@@ -117,6 +117,24 @@ impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
 
     /// Allocates a new value on the stack.
     #[must_use]
+    pub fn into_future<U>(self) -> Handle<'s, dyn Future<Output = U>, SIZE>
+    where
+        T: Future<Output = U> + Sized,
+        U: ?Sized,
+    {
+        let converted: Handle<dyn Future<Output = U>, SIZE> = Handle {
+            inst: self.inst,
+            addr: self.addr,
+            old_cursor: self.old_cursor,
+            stack: self.stack,
+            destructor: self.destructor,
+        };
+        let transmuted: Handle<dyn Future<Output = U>, SIZE> = unsafe { transmute(converted) };
+        forget(self);
+        transmuted
+    }
+    /// Allocates a new value on the stack.
+    #[must_use]
     pub fn convert<U>(self) -> Handle<'s, U, SIZE>
     where
         T: DerefMut<Target = U>,
@@ -142,6 +160,12 @@ impl<T: ?Sized, const SIZE: usize> Deref for Handle<'_, T, SIZE> {
     }
 }
 
+impl<T: ?Sized, const SIZE: usize> DerefMut for Handle<'_, T, SIZE> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.inst
+    }
+}
+
 impl<T: ?Sized, const SIZE: usize> Drop for Handle<'_, T, SIZE> {
     fn drop(&mut self) {
         self.stack.cursor = self.old_cursor;
@@ -154,6 +178,7 @@ impl<T: ?Sized, const SIZE: usize> Drop for Handle<'_, T, SIZE> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -189,6 +214,42 @@ mod tests {
     }
 
     #[test]
+    fn test_async() {
+        static mut NUM_DROPPED: usize = 0;
+
+        #[derive(Debug)]
+        struct Data<const SIZE: usize>(MaybeUninit<[u8; SIZE]>);
+
+        impl<const SIZE: usize> Drop for Data<SIZE> {
+            fn drop(&mut self) {
+                unsafe { NUM_DROPPED += 1 };
+            }
+        }
+
+        let mut ds = DS::new();
+        let data = Data::<400>(MaybeUninit::uninit());
+        let handle: Handle<dyn Future<Output = ()>> = if ds.buffer_addr() % 2 == 0 {
+            ds.alloc_sized(|| {
+                Ok::<_, ()>(async move {
+                    let data_moved = data;
+                    println!("HI {:?}", &data_moved);
+                })
+            })
+            .unwrap()
+            .into_future()
+        } else {
+            ds.alloc_sized(|| {
+                Ok::<_, ()>(async {
+                    println!("HO");
+                })
+            })
+            .unwrap()
+            .into_future()
+        };
+        drop(handle);
+        assert_eq!(unsafe { NUM_DROPPED }, 1);
+    }
+    #[test]
     fn test_deref() {
         trait A {
             fn a(&self) -> usize;
@@ -205,7 +266,6 @@ mod tests {
 
         impl Deref for Data1 {
             type Target = dyn A;
-
             fn deref(&self) -> &Self::Target {
                 self
             }
@@ -228,7 +288,6 @@ mod tests {
 
         impl Deref for Data2 {
             type Target = dyn A;
-
             fn deref(&self) -> &Self::Target {
                 self
             }
