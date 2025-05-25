@@ -303,6 +303,22 @@ where
     }
 }
 
+impl<'s, T: Sized, const SIZE: usize, const LEN: usize> From<Handle<'s, [T; LEN], SIZE>>
+    for Handle<'s, [T], SIZE>
+{
+    fn from(value: Handle<'s, [T; LEN], SIZE>) -> Self {
+        let converted: Handle<[T], SIZE> = Handle {
+            inst: value.inst,
+            old_cursor: value.old_cursor,
+            stack: value.stack,
+            destructor: value.destructor,
+        };
+        let transmuted: Self = unsafe { transmute(converted) };
+        forget(value);
+        transmuted
+    }
+}
+
 impl<'s, T, U, const SIZE: usize> From<Handle<'s, T, SIZE>>
     for Handle<'s, dyn Future<Output = U>, SIZE>
 where
@@ -375,12 +391,22 @@ mod tests {
         }
 
         let mut ds = CompanionStack::<1024>::new();
-        let handle = ds.push_many(|i| Ok::<_, ()>(Data(i)), 7).unwrap();
-        assert_eq!(handle.len(), 7);
-        assert!(!handle.iter().enumerate().any(|(i, data)| i != data.0));
-        drop(handle);
-        assert_eq!(unsafe { NUM_DROPPED }, 7);
-        assert_eq!(ds.cursor, 0);
+        let mut handle1 = ds.push_many(|i| Ok::<_, ()>(Data(i)), 7).unwrap();
+        let (array1, ds) = handle1.split();
+        let handle2 = ds
+            .push_one(|| Ok::<_, ()>([Data(0), Data(1), Data(2)]))
+            .unwrap();
+        assert_eq!(array1.len(), 7);
+        assert_eq!(handle2.len(), 3);
+        assert!(!array1.iter().enumerate().any(|(i, data)| i != data.0));
+
+        let handle3: Handle<[Data], 1024> = handle2.into();
+        assert!(!handle3.iter().enumerate().any(|(i, data)| i != data.0));
+        drop(handle3);
+        assert_eq!(unsafe { NUM_DROPPED }, 3);
+
+        drop(handle1);
+        assert_eq!(unsafe { NUM_DROPPED }, 10);
     }
 
     #[test]
