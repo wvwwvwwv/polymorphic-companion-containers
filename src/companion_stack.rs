@@ -69,7 +69,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         let old_cursor = self.cursor;
         self.cursor = self.cursor + aligned_offset + size;
         let destructor = if std::mem::needs_drop::<T>() {
-            drop_in_place::<T> as usize
+            Self::simple_destructor::<T> as usize
         } else {
             0
         };
@@ -81,7 +81,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         })
     }
 
-    /// Pushes a slice onto the stack.
+    /// Pushes a multiple instances.
     ///
     /// # Errors
     ///
@@ -194,6 +194,11 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     #[must_use]
     pub fn buffer_addr(&self) -> usize {
         self.buffer.as_ptr() as usize
+    }
+
+    fn simple_destructor<T: Sized>(addr: usize, _len: usize) {
+        let ptr = addr as *mut T;
+        unsafe { std::ptr::drop_in_place::<T>(ptr) };
     }
 
     fn slice_destructor<T: Sized>(addr: usize, len: usize) {
