@@ -44,7 +44,7 @@ impl<const SIZE: usize> DS<SIZE> {
     /// # Errors
     ///
     /// Returns an error if the stack is full or if the alignment of the type is not supported.
-    pub fn alloc_sized<E, T: Sized, C: FnOnce() -> Result<T, E>>(
+    pub fn push<E, T: Sized, C: FnOnce() -> Result<T, E>>(
         &mut self,
         constructor: C,
     ) -> Result<Handle<T, SIZE>, Error<E>> {
@@ -80,7 +80,50 @@ impl<const SIZE: usize> DS<SIZE> {
         };
         Ok(Handle {
             inst: unsafe { &mut *ptr },
-            addr: ptr as usize,
+            old_cursor,
+            stack: self,
+            destructor,
+        })
+    }
+
+    /// Pushes a slice onto the stack.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stack is full.
+    pub fn push_slice<T: Sized>(&mut self, slice: &[T]) -> Option<Handle<[T], SIZE>> {
+        let alignment = align_of::<T>();
+        let size = size_of::<T>().checked_mul(slice.len())?;
+        let buffer_start = unsafe { self.buffer.as_ptr().cast::<u8>().add(self.cursor) };
+        let aligned_offset = buffer_start.align_offset(alignment);
+        if aligned_offset == usize::MAX
+            || self
+                .cursor
+                .checked_add(aligned_offset)
+                .and_then(|start| start.checked_add(size))
+                .filter(|end| *end <= SIZE)
+                .is_none()
+        {
+            return None;
+        }
+        let ptr = unsafe {
+            self.buffer
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(self.cursor + aligned_offset)
+                .cast::<T>()
+        };
+        unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len()) };
+
+        let old_cursor = self.cursor;
+        self.cursor = self.cursor + aligned_offset + size;
+        let destructor = if std::mem::needs_drop::<T>() {
+            Self::slice_destructor::<T> as usize
+        } else {
+            0
+        };
+        Some(Handle {
+            inst: unsafe { &mut *std::ptr::slice_from_raw_parts_mut(ptr, slice.len()) },
             old_cursor,
             stack: self,
             destructor,
@@ -91,6 +134,13 @@ impl<const SIZE: usize> DS<SIZE> {
     #[must_use]
     pub fn buffer_addr(&self) -> usize {
         self.buffer.as_ptr() as usize
+    }
+
+    fn slice_destructor<T: Sized>(addr: usize, len: usize) {
+        let ptr = addr as *mut T;
+        for i in 0..len {
+            unsafe { std::ptr::drop_in_place::<T>(ptr.add(i)) };
+        }
     }
 }
 
@@ -103,7 +153,6 @@ impl<const SIZE: usize> Default for DS<SIZE> {
 /// A dynamically sized stack handle.
 pub struct Handle<'s, T: ?Sized, const SIZE: usize = DEFAULT_STACK_SIZE> {
     inst: &'s mut T,
-    addr: usize,
     old_cursor: usize,
     stack: &'s mut DS<SIZE>,
     destructor: usize,
@@ -124,7 +173,6 @@ impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
     {
         let converted: Handle<U, SIZE> = Handle {
             inst: self.inst,
-            addr: self.addr,
             old_cursor: self.old_cursor,
             stack: self.stack,
             destructor: self.destructor,
@@ -152,8 +200,16 @@ impl<T: ?Sized, const SIZE: usize> Drop for Handle<'_, T, SIZE> {
     fn drop(&mut self) {
         self.stack.cursor = self.old_cursor;
         if self.destructor != 0 {
-            let destructor: fn(usize) = unsafe { transmute(self.destructor) };
-            destructor(self.addr);
+            let destructor: fn(usize, usize) = unsafe { transmute(self.destructor) };
+            #[allow(clippy::ref_as_ptr)]
+            let addr = (self.inst as *mut T).cast::<()>() as usize;
+            let len = if size_of::<&T>() == size_of::<*mut ()>() {
+                1
+            } else {
+                let ptr = std::ptr::addr_of!(self.inst).cast::<usize>();
+                unsafe { *ptr.add(1) }
+            };
+            destructor(addr, len);
         }
     }
 }
@@ -167,7 +223,6 @@ where
     fn from(value: Handle<'s, T, SIZE>) -> Self {
         let converted: Handle<dyn DerefMut<Target = U>, SIZE> = Handle {
             inst: value.inst,
-            addr: value.addr,
             old_cursor: value.old_cursor,
             stack: value.stack,
             destructor: value.destructor,
@@ -197,7 +252,6 @@ where
     fn from(value: Handle<'s, T, SIZE>) -> Self {
         let converted: Handle<dyn Future<Output = U>, SIZE> = Handle {
             inst: value.inst,
-            addr: value.addr,
             old_cursor: value.old_cursor,
             stack: value.stack,
             destructor: value.destructor,
@@ -228,15 +282,15 @@ mod tests {
 
         let mut ds = DS::<1024>::new();
         let mut handle1 = ds
-            .alloc_sized(|| Ok::<_, ()>(Data::<512>(MaybeUninit::uninit())))
+            .push(|| Ok::<_, ()>(Data::<512>(MaybeUninit::uninit())))
             .unwrap();
         let (_, ds1) = handle1.split();
         let mut handle2 = ds1
-            .alloc_sized(|| Ok::<_, ()>(Data::<400>(MaybeUninit::uninit())))
+            .push(|| Ok::<_, ()>(Data::<400>(MaybeUninit::uninit())))
             .unwrap();
         let (_, ds2) = handle2.split();
         assert!(
-            ds2.alloc_sized(|| Ok::<_, ()>(Data::<400>(MaybeUninit::uninit())))
+            ds2.push(|| Ok::<_, ()>(Data::<400>(MaybeUninit::uninit())))
                 .is_err()
         );
         drop(handle2);
@@ -261,7 +315,7 @@ mod tests {
         let mut ds = DS::new();
         let data = Data::<400>(MaybeUninit::uninit());
         let handle: Handle<dyn Future<Output = ()>> = if ds.buffer_addr() % 2 == 0 {
-            ds.alloc_sized(|| {
+            ds.push(|| {
                 Ok::<_, ()>(async move {
                     let data_moved = data;
                     println!("HI {:?}", &data_moved);
@@ -270,7 +324,7 @@ mod tests {
             .unwrap()
             .into()
         } else {
-            ds.alloc_sized(|| {
+            ds.push(|| {
                 Ok::<_, ()>(async {
                     println!("HO");
                 })
@@ -281,6 +335,7 @@ mod tests {
         drop(handle);
         assert_eq!(unsafe { NUM_DROPPED }, 1);
     }
+
     #[test]
     fn test_deref() {
         static mut NUM_DROPPED: usize = 0;
@@ -342,9 +397,9 @@ mod tests {
         let mut ds = DS::<1024>::new();
         let mut handle_deref_mut: Handle<dyn DerefMut<Target = dyn A>, 1024> =
             if ds.buffer_addr() % 2 == 1 {
-                ds.alloc_sized(|| Ok::<_, ()>(Data1(11))).unwrap().into()
+                ds.push(|| Ok::<_, ()>(Data1(11))).unwrap().into()
             } else {
-                ds.alloc_sized(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
+                ds.push(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
                     .unwrap()
                     .into()
             };
@@ -353,11 +408,11 @@ mod tests {
         let (_, ds) = handle_deref_mut.split();
 
         let handle_dyn: Handle<dyn A, 1024> = if ds.buffer_addr() % 2 == 0 {
-            ds.alloc_sized(|| Ok::<_, ()>(Data1(11)))
+            ds.push(|| Ok::<_, ()>(Data1(11)))
                 .unwrap()
                 .into_deref_target()
         } else {
-            ds.alloc_sized(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
+            ds.push(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
                 .unwrap()
                 .into_deref_target()
         };
@@ -367,5 +422,36 @@ mod tests {
         drop(handle_deref_mut);
 
         assert_eq!(unsafe { NUM_DROPPED }, 1);
+    }
+
+    #[test]
+    fn test_slice() {
+        static mut NUM_DROPPED: usize = 0;
+
+        #[derive(Debug, Default)]
+        struct Data(usize);
+
+        impl Drop for Data {
+            fn drop(&mut self) {
+                assert_ne!(self.0, usize::MAX);
+                self.0 = usize::MAX;
+                unsafe { NUM_DROPPED += 1 };
+            }
+        }
+
+        let mut ds = DS::<1024>::new();
+        let mut handle_slice: Handle<[Data], 1024> = if ds.buffer_addr() % 2 == 0 {
+            ds.push_slice(&[Data(10), Data(11)]).unwrap()
+        } else {
+            ds.push_slice(&[Data(12), Data(13), Data(14)]).unwrap()
+        };
+        handle_slice[0].0 = 15;
+        assert_eq!(handle_slice.len(), 2);
+        assert_eq!(handle_slice[0].0, 15);
+        assert_eq!(handle_slice[1].0, 11);
+
+        drop(handle_slice);
+
+        assert_eq!(unsafe { NUM_DROPPED }, 4);
     }
 }
