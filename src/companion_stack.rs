@@ -73,15 +73,41 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     /// # Errors
     ///
     /// Returns an [`Error`] if the stack is full or the constructor fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pcc::CompanionStack;
+    /// use pcc::companion_stack::Error;
+    ///
+    /// let mut stack = CompanionStack::<16>::new();
+    /// let mut thirty_seven = stack.push_one(|| Ok::<_, ()>(37_usize)).unwrap();
+    /// assert_eq!(*thirty_seven, 37);
+    ///
+    /// let (_, stack) = thirty_seven.get_stack();
+    ///
+    /// let error = stack.push_one(|| Err::<(), String>("ERROR".to_string())).unwrap_err();
+    /// match error {
+    ///     Error::Full => panic!("Stack should not be full"),
+    ///     Error::ConstructionFailed(e) => assert_eq!(e, "ERROR"),
+    /// }
+    ///
+    /// let error = stack.push_one(|| Ok::<_, ()>([0; 16])).unwrap_err();
+    /// match error {
+    ///     Error::Full => assert_eq!(stack.pos(), size_of::<usize>()),
+    ///     Error::ConstructionFailed(_) => panic!("Construction should not fail"),
+    /// }
+    /// ```
+    #[inline]
     pub fn push_one<E, T: Sized, C: FnOnce() -> Result<T, E>>(
         &mut self,
         constructor: C,
     ) -> Result<Handle<T, SIZE>, Error<E>> {
         let allocated = self.allocate::<T>(1).ok_or(Error::Full)?;
-        unsafe {
-            allocated
-                .ptr
-                .write(constructor().map_err(|e| Error::ConstructionFailed(e))?);
+        let val = constructor().map_err(|e| Error::ConstructionFailed(e))?;
+        let value_mut = unsafe {
+            allocated.ptr.write(val);
+            &mut *allocated.ptr
         };
 
         let old_cursor = self.cursor;
@@ -92,7 +118,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
             0
         };
         Ok(Handle {
-            value_mut: unsafe { &mut *allocated.ptr },
+            value_mut,
             stack_mut: self,
             old_cursor,
             destructor,
@@ -169,16 +195,26 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     }
 
     /// Returns the address of the buffer.
+    #[inline]
     #[must_use]
     pub fn buffer_addr(&self) -> usize {
         self.buffer.as_ptr() as usize
     }
 
+    /// Returns the current position of the cursor.
+    #[inline]
+    #[must_use]
+    pub fn pos(&self) -> usize {
+        self.cursor
+    }
+
+    /// Destructs the given element.
     fn simple_destructor<T: Sized>(addr: usize, _len: usize) {
         let ptr = addr as *mut T;
         unsafe { drop_in_place::<T>(ptr) };
     }
 
+    /// Destructs the given slice of elements.
     fn slice_destructor<T: Sized>(addr: usize, len: usize) {
         let ptr = addr as *mut T;
         for i in 0..len {
@@ -186,16 +222,16 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         }
     }
 
-    fn allocate<T: Sized>(&mut self, len: usize) -> Option<Allocation<T>> {
-        let alignment = align_of::<T>();
-        let size = size_of::<T>().checked_mul(len)?;
+    /// Allocates a chunk of memory for the given type.
+    fn allocate<T: Sized>(&self, len: usize) -> Option<Allocation<T>> {
+        let requested_size = size_of::<T>().checked_mul(len)?;
         let buffer_start = unsafe { self.buffer.as_ptr().cast::<u8>().add(self.cursor) };
-        let aligned_offset = buffer_start.align_offset(alignment);
+        let aligned_offset = buffer_start.align_offset(align_of::<T>());
         if aligned_offset == usize::MAX
             || self
                 .cursor
                 .checked_add(aligned_offset)
-                .and_then(|start| start.checked_add(size))
+                .and_then(|start| start.checked_add(requested_size))
                 .filter(|end| *end <= SIZE)
                 .is_none()
         {
@@ -204,12 +240,13 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
 
         let ptr = unsafe {
             self.buffer
-                .as_mut_ptr()
+                .as_ptr()
                 .cast::<u8>()
                 .add(self.cursor + aligned_offset)
                 .cast::<T>()
+                .cast_mut()
         };
-        let upper_bound = self.cursor + aligned_offset + size;
+        let upper_bound = self.cursor + aligned_offset + requested_size;
         Some(Allocation { ptr, upper_bound })
     }
 }
