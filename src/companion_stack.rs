@@ -18,7 +18,7 @@ pub struct CompanionStack<const SIZE: usize = DEFAULT_STACK_SIZE> {
 }
 
 /// The default size of [`CompanionStack`].
-pub const DEFAULT_STACK_SIZE: usize = size_of::<usize>() * 4096;
+pub const DEFAULT_STACK_SIZE: usize = size_of::<usize>() * 4095;
 
 /// [`CompanionStack`] raises an [`Error`] if the stack is full or fails to construct a value.
 #[derive(Debug)]
