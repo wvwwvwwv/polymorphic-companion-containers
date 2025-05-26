@@ -85,8 +85,8 @@ jobs:
       - name: Doc
         run: cargo doc --document-private-items
       - name: Nightly
-        run: cargo +nightly test --release benchmark;
-          cargo +nightly test -p examples --release
+        run: cargo +nightly test --features nightly;
+          cargo +nightly test --release --features nightly
   benchmark:
     runs-on: ubuntu-latest
     timeout-minutes: 15

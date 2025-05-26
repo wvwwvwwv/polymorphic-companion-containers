@@ -1,4 +1,5 @@
-//! Companion stack.
+//! [`CompanionStack`] is a first-in-first-out data structure that provides a safe and efficient way
+//! to allocate and deallocate values on the stack at runtime.
 
 use std::mem::{MaybeUninit, align_of, forget, transmute};
 use std::ops::{Deref, DerefMut};
@@ -6,22 +7,34 @@ use std::ptr::{drop_in_place, write};
 
 use crate::exit_guard::ExitGuard;
 
-const DEFAULT_STACK_SIZE: usize = 16384;
-
-/// A dynamically sized stack.
+/// [`CompanionStack`] is used to allocate and deallocate values on the stack where the size of the
+/// values are not necessarily known at compile time.
 #[derive(Debug)]
 pub struct CompanionStack<const SIZE: usize = DEFAULT_STACK_SIZE> {
+    /// The fixed size buffer.
     buffer: MaybeUninit<[u8; SIZE]>,
+    /// The current position in the buffer.
     cursor: usize,
 }
 
-/// Errors.
+/// The default size of [`CompanionStack`].
+pub const DEFAULT_STACK_SIZE: usize = 16384;
+
+/// [`CompanionStack`] raises an [`Error`] if the stack is full or fails to construct a value.
 #[derive(Debug)]
 pub enum Error<E> {
     /// Failed to construct a value.
     ConstructionFailed(E),
-    /// Stack is full.
+    /// The stack is full.
     Full,
+}
+
+/// A dynamically sized stack handle.
+pub struct Handle<'s, T: ?Sized, const SIZE: usize = DEFAULT_STACK_SIZE> {
+    inst: &'s mut T,
+    old_cursor: usize,
+    stack: &'s mut CompanionStack<SIZE>,
+    destructor: usize,
 }
 
 impl<const SIZE: usize> CompanionStack<SIZE> {
@@ -215,14 +228,6 @@ impl<const SIZE: usize> Default for CompanionStack<SIZE> {
     }
 }
 
-/// A dynamically sized stack handle.
-pub struct Handle<'s, T: ?Sized, const SIZE: usize = DEFAULT_STACK_SIZE> {
-    inst: &'s mut T,
-    old_cursor: usize,
-    stack: &'s mut CompanionStack<SIZE>,
-    destructor: usize,
-}
-
 impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
     /// Borrows itself as a mutable reference and the stack.
     pub fn split(&mut self) -> (&mut T, &mut CompanionStack<SIZE>) {
@@ -246,6 +251,12 @@ impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
         forget(self);
         transmuted
     }
+}
+
+#[cfg(feature = "nightly")]
+impl<'s, T: ?Sized + core::marker::Unsize<U>, U: ?Sized, const SIZE: usize>
+    core::ops::CoerceUnsized<Handle<'s, U, SIZE>> for Handle<'s, T, SIZE>
+{
 }
 
 impl<T: ?Sized, const SIZE: usize> Deref for Handle<'_, T, SIZE> {
@@ -345,9 +356,9 @@ where
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_push_one() {
         static mut NUM_DROPPED: usize = 0;
@@ -380,6 +391,7 @@ mod tests {
         assert_eq!(ds.cursor, 0);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_push_many() {
         static mut NUM_DROPPED: usize = 0;
@@ -414,6 +426,7 @@ mod tests {
         assert_eq!(unsafe { NUM_DROPPED }, 10);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_async() {
         static mut NUM_DROPPED: usize = 0;
@@ -451,6 +464,7 @@ mod tests {
         assert_eq!(unsafe { NUM_DROPPED }, 1);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_deref() {
         static mut NUM_DROPPED: usize = 0;
@@ -539,6 +553,7 @@ mod tests {
         assert_eq!(unsafe { NUM_DROPPED }, 1);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_slice() {
         static mut NUM_DROPPED: usize = 0;
@@ -568,5 +583,98 @@ mod tests {
         drop(handle_slice);
 
         assert_eq!(unsafe { NUM_DROPPED }, 4);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn test_deref_nightly() {
+        static mut NUM_DROPPED: usize = 0;
+
+        trait A {
+            fn a(&self) -> usize;
+        }
+
+        #[derive(Debug)]
+        struct Data1(usize);
+
+        impl Deref for Data1 {
+            type Target = dyn A;
+            fn deref(&self) -> &Self::Target {
+                self
+            }
+        }
+
+        impl A for Data1 {
+            fn a(&self) -> usize {
+                self.0
+            }
+        }
+
+        impl Drop for Data1 {
+            fn drop(&mut self) {
+                unsafe { NUM_DROPPED += 1 };
+            }
+        }
+
+        #[derive(Debug)]
+        struct Data2(String);
+
+        impl A for Data2 {
+            fn a(&self) -> usize {
+                self.0.len()
+            }
+        }
+
+        impl Drop for Data2 {
+            fn drop(&mut self) {
+                unsafe { NUM_DROPPED += 1 };
+            }
+        }
+
+        let mut ds = CompanionStack::<1024>::new();
+        let handle: Handle<dyn A, 1024> = if ds.buffer_addr() % 2 == 1 {
+            ds.push_one(|| Ok::<_, ()>(Data1(11))).unwrap()
+        } else {
+            ds.push_one(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
+                .unwrap()
+        };
+        assert_eq!(handle.a(), 5);
+        drop(handle);
+
+        assert_eq!(unsafe { NUM_DROPPED }, 1);
+    }
+
+    #[cfg(feature = "nightly")]
+    #[test]
+    fn test_slice_nightly() {
+        static mut NUM_DROPPED: usize = 0;
+
+        #[derive(Debug, Default)]
+        struct Data(usize);
+
+        impl Drop for Data {
+            fn drop(&mut self) {
+                assert_ne!(self.0, usize::MAX);
+                self.0 = usize::MAX;
+                unsafe { NUM_DROPPED += 1 };
+            }
+        }
+
+        let mut ds = CompanionStack::<1024>::new();
+        let mut handle_slice: Handle<[Data], 1024> = if ds.buffer_addr() % 2 == 0 {
+            ds.push_one(|| Ok::<_, ()>([Data(10), Data(11)])).unwrap()
+        } else {
+            ds.push_one(|| Ok::<_, ()>([Data(12), Data(13), Data(14)]))
+                .unwrap()
+        };
+        handle_slice[0].0 = 15;
+        assert_eq!(handle_slice.len(), 2);
+        assert_eq!(handle_slice[0].0, 15);
+        assert_eq!(handle_slice[1].0, 11);
+
+        drop(handle_slice);
+
+        assert_eq!(unsafe { NUM_DROPPED }, 2);
     }
 }

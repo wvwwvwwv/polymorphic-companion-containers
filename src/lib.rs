@@ -6,6 +6,11 @@
     clippy::pedantic
 )]
 #![doc = include_str!("../README.md")]
+#![cfg_attr(
+    feature = "nightly",
+    allow(unstable_features),
+    feature(coerce_unsized, unsize)
+)]
 
 pub mod companion_stack;
 
