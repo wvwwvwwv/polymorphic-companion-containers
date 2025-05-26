@@ -68,15 +68,19 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         }
     }
 
-    /// Pushes a new value on the stack.
+    /// Pushes a single value.
     ///
     /// # Errors
     ///
-    /// Returns an [`Error`] if the stack is full or the constructor fails.
+    /// Returns [`Error::Full`] if the stack is full, or an [`Error::ConstructionFailed`] if the
+    /// constructor fails.
     ///
     /// # Examples
     ///
     /// ```
+    /// # if cfg!(miri) {
+    /// #     return;
+    /// # }
     /// use pcc::CompanionStack;
     /// use pcc::companion_stack::Error;
     ///
@@ -105,6 +109,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     ) -> Result<Handle<T, SIZE>, Error<E>> {
         let allocated = self.allocate::<T>(1).ok_or(Error::Full)?;
         let val = constructor().map_err(|e| Error::ConstructionFailed(e))?;
+
         let value_mut = unsafe {
             allocated.ptr.write(val);
             &mut *allocated.ptr
@@ -112,11 +117,13 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
 
         let old_cursor = self.cursor;
         self.cursor = allocated.upper_bound;
+
         let destructor = if needs_drop::<T>() {
             Self::simple_destructor::<T> as usize
         } else {
             0
         };
+
         Ok(Handle {
             value_mut,
             stack_mut: self,
@@ -125,11 +132,35 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         })
     }
 
-    /// Pushes multiple instances.
+    /// Pushes multiple values.
     ///
     /// # Errors
     ///
-    /// Returns an error if the stack is full.
+    /// Returns [`Error::Full`] if the [`CompanionStack`] is full.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # if cfg!(miri) {
+    /// #     return;
+    /// # }
+    /// use pcc::CompanionStack;
+    /// use pcc::companion_stack::Error;
+    ///
+    /// let mut stack = CompanionStack::<256>::new();
+    /// let mut thirty_seven_plus = stack.push_many(|i| Ok::<_, ()>(37_usize + i), 17).unwrap();
+    /// assert_eq!(thirty_seven_plus.len(), 17);
+    /// assert!(!thirty_seven_plus.iter().enumerate().any(|(i, n)| *n != 37 + i));
+    ///
+    /// let (_, stack) = thirty_seven_plus.get_stack();
+    ///
+    /// let error = stack.push_many(|_| Err::<(), String>("ERROR".to_string()), 2).unwrap_err();
+    /// match error {
+    ///     Error::Full => panic!("Stack should not be full"),
+    ///     Error::ConstructionFailed(e) => assert_eq!(e, "ERROR"),
+    /// }
+    /// ```
+    #[inline]
     pub fn push_many<E, T: Sized, C: FnMut(usize) -> Result<T, E>>(
         &mut self,
         mut constructor: C,
@@ -138,6 +169,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         let allocated = self.allocate::<T>(len).ok_or(Error::Full)?;
         for i in 0..len {
             let mut exit_guard = ExitGuard::new(true, |failed| {
+                // Drop all previously constructed elements if construction fails.
                 if failed {
                     for j in 0..i {
                         unsafe {
@@ -146,11 +178,9 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
                     }
                 }
             });
+            let val = constructor(i).map_err(|e| Error::ConstructionFailed(e))?;
             unsafe {
-                write(
-                    allocated.ptr.add(i),
-                    constructor(i).map_err(|e| Error::ConstructionFailed(e))?,
-                );
+                write(allocated.ptr.add(i), val);
             }
             *exit_guard = false;
         }
@@ -206,6 +236,13 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     #[must_use]
     pub fn pos(&self) -> usize {
         self.cursor
+    }
+
+    /// Returns `true` if the [`CompanionStack`] is empty.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cursor == 0
     }
 
     /// Destructs the given element.
