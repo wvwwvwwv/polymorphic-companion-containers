@@ -9,10 +9,7 @@
     not(miri),
     doc = include_str!("../README.md")
 )]
-#![cfg_attr(
-    miri,
-    doc = include_str!("../CHANGELOG.md")
-)]
+#![cfg_attr(miri, doc = "")]
 #![cfg_attr(
     feature = "nightly",
     allow(unstable_features),

@@ -148,9 +148,14 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     /// use pcc::companion_stack::Error;
     ///
     /// let mut stack = CompanionStack::<256>::new();
-    /// let mut thirty_seven_plus = stack.push_many(|i| Ok::<_, ()>(37_usize + i), 17).unwrap();
+    /// let number = "37";
+    /// let mut thirty_seven_plus = if number == "37" {
+    ///     stack.push_many(|i| Ok::<_, ()>(37_u64 + i as u64), 17).unwrap()
+    /// } else {
+    ///     stack.push_many(|i| Ok::<_, ()>(47_u64 + i as u64), 67).unwrap()
+    /// };
     /// assert_eq!(thirty_seven_plus.len(), 17);
-    /// assert!(!thirty_seven_plus.iter().enumerate().any(|(i, n)| *n != 37 + i));
+    /// assert!(!thirty_seven_plus.iter().enumerate().any(|(i, n)| *n != 37_u64 + i as u64));
     ///
     /// let (_, stack) = thirty_seven_plus.get_stack();
     ///
@@ -200,11 +205,32 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         })
     }
 
-    /// Pushes a slice onto the stack.
+    /// Pushes a slice.
     ///
-    /// # Errors
+    /// Returns `None` if the [`CompanionStack`] is full.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// # if cfg!(miri) {
+    /// #     return;
+    /// # }
+    /// use pcc::CompanionStack;
+    /// use pcc::companion_stack::Error;
+    ///
+    /// let mut stack = CompanionStack::<64>::new();
+    /// let mut seven_plus = stack.push_slice(&[0_u64; 7]).unwrap();
+    /// assert_eq!(seven_plus.len(), 7);
+    ///
+    /// seven_plus.iter_mut().enumerate().for_each(|(i, n)| *n += 37 + i as u64);
+    /// assert!(!seven_plus.iter().enumerate().any(|(i, n)| *n != 37 + i as u64));
+    ///
+    /// let (_, stack) = seven_plus.get_stack();
+    ///
+    /// assert!(stack.push_slice(&[0_u64; 17]).is_none());
+    /// ```
     /// Returns an error if the stack is full.
+    #[inline]
     pub fn push_slice<T: Sized>(&mut self, slice: &[T]) -> Option<Handle<[T], SIZE>> {
         let allocated = self.allocate::<T>(slice.len())?;
         unsafe { copy_nonoverlapping(slice.as_ptr(), allocated.ptr, slice.len()) };
@@ -308,11 +334,13 @@ impl Default for CompanionStack<DEFAULT_STACK_SIZE> {
 
 impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
     /// Borrows itself as a mutable reference and the stack.
+    #[inline]
     pub fn get_stack(&mut self) -> (&mut T, &mut CompanionStack<SIZE>) {
         (self.value_mut, self.stack_mut)
     }
 
     /// Converts the handle to a different type.
+    #[inline]
     #[must_use]
     pub fn into_deref_target<U>(self) -> Handle<'s, U, SIZE>
     where
@@ -339,18 +367,22 @@ impl<'s, T: ?Sized + core::marker::Unsize<U>, U: ?Sized, const SIZE: usize>
 
 impl<T: ?Sized, const SIZE: usize> Deref for Handle<'_, T, SIZE> {
     type Target = T;
+
+    #[inline]
     fn deref(&self) -> &T {
         self.value_mut
     }
 }
 
 impl<T: ?Sized, const SIZE: usize> DerefMut for Handle<'_, T, SIZE> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut T {
         self.value_mut
     }
 }
 
 impl<T: ?Sized, const SIZE: usize> Drop for Handle<'_, T, SIZE> {
+    #[inline]
     fn drop(&mut self) {
         self.stack_mut.cursor = self.old_cursor;
         if self.destructor != 0 {
@@ -374,6 +406,7 @@ where
     T: DerefMut<Target = U>,
     U: ?Sized,
 {
+    #[inline]
     fn from(value: Handle<'s, T, SIZE>) -> Self {
         let converted: Handle<dyn DerefMut<Target = U>, SIZE> = Handle {
             value_mut: value.value_mut,
@@ -400,6 +433,7 @@ where
 impl<'s, T: Sized, const SIZE: usize, const LEN: usize> From<Handle<'s, [T; LEN], SIZE>>
     for Handle<'s, [T], SIZE>
 {
+    #[inline]
     fn from(value: Handle<'s, [T; LEN], SIZE>) -> Self {
         let converted: Handle<[T], SIZE> = Handle {
             value_mut: value.value_mut,
@@ -419,6 +453,7 @@ where
     T: Future<Output = U>,
     U: ?Sized,
 {
+    #[inline]
     fn from(value: Handle<'s, T, SIZE>) -> Self {
         let converted: Handle<dyn Future<Output = U>, SIZE> = Handle {
             value_mut: value.value_mut,

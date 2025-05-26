@@ -12,7 +12,7 @@
 
 ### Examples
 
-Two different `impl Future<Output = ()>` types can be coalesced into a single `dyn Future<Output = ()>` instance without allocating heap memory.
+Two different `impl Future<Output = ()>` types can be coerced into a `dyn Future<Output = ()>` reference without allocating heap memory.
 
 ```rust
 use pcc::CompanionStack;
@@ -21,10 +21,10 @@ use std::time::SystemTime;
 
 let start = SystemTime::now();
 
-let mut dyn_stack = CompanionStack::new();
+let mut dyn_stack = CompanionStack::default();
 
-// Different `impl Future<Output = ()>` can be used in the code, and either of them can be referred
-// to as `dyn Future<Output = ()>` without boxing them.
+// Different `impl Future<Output = ()>` can be used in the code, and either of them can be
+// referred to as `dyn Future<Output = ()>` without boxing them.
 let mut dyn_future: Handle<dyn Future<Output = ()>> = if start == SystemTime::now() {
     dyn_stack.push_one(|| {
         Ok::<_, ()>(async {
@@ -43,7 +43,22 @@ let mut dyn_future: Handle<dyn Future<Output = ()>> = if start == SystemTime::no
     .into()
 };
 
-// The `CompanionStack` instance can be retrieved, but the lifetime of the reference is limited to
-// the scope of the `dyn_future` variable.
+// The `CompanionStack` instance can be retrieved, but the lifetime of the reference is
+// limited to the scope of the `dyn_future` variable.
 let (dyn_future, dyn_stack) = dyn_future.get_stack();
+
+// The buffer is allocated on the stack.
+let mut buffer_size = 1024;
+let mut dyn_buffer: Handle<[u8]> =
+    dyn_stack.push_many(|_| Ok::<_, ()>(0_u8), buffer_size).unwrap();
+assert_eq!(dyn_buffer.len(), 1024);
+
+// The buffer is popped from the stack.
+drop(dyn_buffer);
+
+// Another buffer of a different size is allocated on the stack.
+buffer_size *= 2;
+let mut dyn_buffer: Handle<[u8]> =
+    dyn_stack.push_many(|_| Ok::<_, ()>(0_u8), buffer_size).unwrap();
+assert_eq!(dyn_buffer.len(), 2048);
 ```
