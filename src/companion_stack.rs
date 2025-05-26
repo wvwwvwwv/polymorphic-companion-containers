@@ -2,10 +2,10 @@
 //! to allocate and deallocate values on the stack at runtime.
 
 use super::exit_guard::ExitGuard;
-use std::borrow::{Borrow, BorrowMut};
-use std::mem::{MaybeUninit, align_of, forget, needs_drop, transmute};
-use std::ops::{Deref, DerefMut};
-use std::ptr::{addr_of, copy_nonoverlapping, drop_in_place, slice_from_raw_parts_mut, write};
+use core::borrow::{Borrow, BorrowMut};
+use core::mem::{MaybeUninit, align_of, forget, needs_drop, transmute};
+use core::ops::{Deref, DerefMut};
+use core::ptr::{addr_of, copy_nonoverlapping, drop_in_place, slice_from_raw_parts_mut, write};
 
 /// [`CompanionStack`] is used to allocate and deallocate values on the stack when the sizes of the
 /// values are not necessarily known at compile time.
@@ -645,8 +645,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering::Relaxed;
+    use core::sync::atomic::AtomicUsize;
+    use core::sync::atomic::Ordering::Relaxed;
 
     #[cfg_attr(miri, ignore)]
     #[test]
@@ -733,23 +733,21 @@ mod tests {
 
         let mut dyn_stack = CompanionStack::new();
         let data = Data::<400>(MaybeUninit::uninit());
-        let handle: Handle<dyn Future<Output = ()>> = if dyn_stack.buffer_addr() % 2 == 0 {
+        let handle: Handle<dyn Future<Output = usize>> = if dyn_stack.buffer_addr() % 2 == 0 {
             dyn_stack
                 .push_one(|| {
                     Ok::<_, ()>(async move {
                         let data_moved = data;
-                        println!("HI {:?}", &data_moved);
+                        let result = addr_of!(data_moved) as usize;
+                        drop(data_moved);
+                        result
                     })
                 })
                 .unwrap()
                 .into()
         } else {
             dyn_stack
-                .push_one(|| {
-                    Ok::<_, ()>(async {
-                        println!("HO");
-                    })
-                })
+                .push_one(|| Ok::<_, ()>(async { addr_of!(data) as usize }))
                 .unwrap()
                 .into()
         };
@@ -795,7 +793,7 @@ mod tests {
         }
 
         #[derive(Debug)]
-        struct Data2(String);
+        struct Data2([u8; 4]);
 
         impl A for Data2 {
             fn a(&self) -> usize {
@@ -825,11 +823,11 @@ mod tests {
                     .into()
             } else {
                 dyn_stack
-                    .push_one(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
+                    .push_one(|| Ok::<_, ()>(Data2([1, 2, 3, 4])))
                     .unwrap()
                     .into()
             };
-        assert_eq!(handle_deref_mut.a(), 5);
+        assert_eq!(handle_deref_mut.a(), 4);
 
         let (_, dyn_stack) = handle_deref_mut.retrieve_stack();
 
@@ -840,7 +838,7 @@ mod tests {
                 .into_deref_target()
         } else {
             dyn_stack
-                .push_one(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
+                .push_one(|| Ok::<_, ()>(Data2([1, 2, 3, 4])))
                 .unwrap()
                 .into_deref_target()
         };
@@ -919,7 +917,7 @@ mod tests {
         }
 
         #[derive(Debug)]
-        struct Data2(String);
+        struct Data2([u8; 4]);
 
         impl A for Data2 {
             fn a(&self) -> usize {
@@ -938,10 +936,10 @@ mod tests {
             dyn_stack.push_one(|| Ok::<_, ()>(Data1(11))).unwrap()
         } else {
             dyn_stack
-                .push_one(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
+                .push_one(|| Ok::<_, ()>(Data2([1, 2, 3, 4])))
                 .unwrap()
         };
-        assert_eq!(handle.a(), 5);
+        assert_eq!(handle.a(), 4);
         drop(handle);
 
         assert_eq!(NUM_DROPPED.load(Relaxed), 1);

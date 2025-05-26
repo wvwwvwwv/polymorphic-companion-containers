@@ -1,7 +1,7 @@
 //! This module implements a simplified, yet safe version of
 //! [`scopeguard`](https://crates.io/crates/scopeguard).
 
-use std::ops::{Deref, DerefMut};
+use core::ops::{Deref, DerefMut};
 
 /// [`ExitGuard`] captures the environment and invokes the defined closure at the end of the scope.
 pub(crate) struct ExitGuard<T, F: FnOnce(T)> {
