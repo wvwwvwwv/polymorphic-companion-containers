@@ -175,7 +175,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     ) -> Result<Handle<[T], SIZE>, Error<E>> {
         let allocated = self.allocate::<T>(len).ok_or(Error::Full)?;
         for i in 0..len {
-            let mut exit_guard = ExitGuard::new(true, |failed| {
+            let mut exit_guard = ExitGuard::new(needs_drop::<T>(), |failed| {
                 // Drop all previously constructed elements if construction fails.
                 if failed {
                     for j in 0..i {
@@ -250,18 +250,63 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         })
     }
 
-    /// Returns the address of the buffer.
+    /// Returns the current position of the cursor.
+    ///
+    /// Each [`CompanionStack`] has a cursor that points to the next available byte in the buffer,
+    /// and the method returns the current position of the cursor. `SIZE - the position value` is
+    /// the remaining bytes in the [`CompanionStack`] that are available for use.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # if cfg!(miri) {
+    /// #     return;
+    /// # }
+    /// use pcc::CompanionStack;
+    ///
+    /// #[repr(align(64))]
+    /// struct A(u8);
+    ///
+    /// let mut dyn_stack = CompanionStack::<256>::new();
+    /// assert_eq!(dyn_stack.pos(), 0);
+    ///
+    /// let mut three = dyn_stack.push_one(|| Ok::<_, ()>(A(3))).unwrap();
+    /// let (three, dyn_stack) = three.retrieve_stack();
+    /// assert_eq!(three.0, 3);
+    /// let alignment_offset = if dyn_stack.buffer_addr() % 64 == 0 {
+    ///     0
+    /// }  else {
+    ///     64 - dyn_stack.buffer_addr() % 64
+    /// };
+    /// assert_eq!(dyn_stack.pos(), alignment_offset + 64);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn pos(&self) -> usize {
+        self.cursor
+    }
+
+    /// Returns the start address of the buffer.
+    ///
+    /// Relying on [`Self::pos`] is insufficient to determine whether the buffer can accomodate
+    /// desired data, because the start address of the available buffer may not be aligned to the
+    /// required alignment.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # if cfg!(miri) {
+    /// #     return;
+    /// # }
+    /// use pcc::CompanionStack;
+    ///
+    /// let mut dyn_stack = CompanionStack::default();
+    /// assert_ne!(dyn_stack.buffer_addr(), 0);
+    /// ```
     #[inline]
     #[must_use]
     pub fn buffer_addr(&self) -> usize {
         self.buffer.as_ptr() as usize
-    }
-
-    /// Returns the current position of the cursor.
-    #[inline]
-    #[must_use]
-    pub fn pos(&self) -> usize {
-        self.cursor
     }
 
     /// Returns `true` if the [`CompanionStack`] is empty.
@@ -284,7 +329,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.cursor == 0
     }
 
