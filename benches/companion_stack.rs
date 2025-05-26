@@ -12,7 +12,7 @@ fn dynamic_stack(c: &mut Criterion) {
             return max;
         }
         let mut usize_val = stack.push_one(|| Ok::<_, ()>(depth)).unwrap();
-        let (usize_val, stack) = usize_val.get_stack();
+        let (usize_val, stack) = usize_val.retrieve_stack();
         assert_ne!(*usize_val, 0);
         *usize_val -= 1;
         let new_max = recursive::<SIZE>(*usize_val, max.max(*usize_val), stack);

@@ -57,7 +57,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     /// ```
     /// use pcc::CompanionStack;
     ///
-    /// let mut stack = CompanionStack::<65536>::new();
+    /// let mut dyn_stack = CompanionStack::<65536>::new();
     /// ```
     #[inline]
     #[must_use]
@@ -84,21 +84,21 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     /// use pcc::CompanionStack;
     /// use pcc::companion_stack::Error;
     ///
-    /// let mut stack = CompanionStack::<16>::new();
-    /// let mut thirty_seven = stack.push_one(|| Ok::<_, ()>(37_usize)).unwrap();
+    /// let mut dyn_stack = CompanionStack::<16>::new();
+    /// let mut thirty_seven = dyn_stack.push_one(|| Ok::<_, ()>(37_usize)).unwrap();
     /// assert_eq!(*thirty_seven, 37);
     ///
-    /// let (_, stack) = thirty_seven.get_stack();
+    /// let (_, dyn_stack) = thirty_seven.retrieve_stack();
     ///
-    /// let error = stack.push_one(|| Err::<(), String>("ERROR".to_string())).unwrap_err();
+    /// let error = dyn_stack.push_one(|| Err::<(), String>("ERROR".to_string())).unwrap_err();
     /// match error {
     ///     Error::Full => panic!("Stack should not be full"),
     ///     Error::ConstructionFailed(e) => assert_eq!(e, "ERROR"),
     /// }
     ///
-    /// let error = stack.push_one(|| Ok::<_, ()>([0; 16])).unwrap_err();
+    /// let error = dyn_stack.push_one(|| Ok::<_, ()>([0; 16])).unwrap_err();
     /// match error {
-    ///     Error::Full => assert_eq!(stack.pos(), size_of::<usize>()),
+    ///     Error::Full => assert_eq!(dyn_stack.pos(), size_of::<usize>()),
     ///     Error::ConstructionFailed(_) => panic!("Construction should not fail"),
     /// }
     /// ```
@@ -147,19 +147,19 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     /// use pcc::CompanionStack;
     /// use pcc::companion_stack::Error;
     ///
-    /// let mut stack = CompanionStack::<256>::new();
+    /// let mut dyn_stack = CompanionStack::<256>::new();
     /// let number = "37";
     /// let mut thirty_seven_plus = if number == "37" {
-    ///     stack.push_many(|i| Ok::<_, ()>(37_u64 + i as u64), 17).unwrap()
+    ///     dyn_stack.push_many(|i| Ok::<_, ()>(37_u64 + i as u64), 17).unwrap()
     /// } else {
-    ///     stack.push_many(|i| Ok::<_, ()>(47_u64 + i as u64), 67).unwrap()
+    ///     dyn_stack.push_many(|i| Ok::<_, ()>(47_u64 + i as u64), 67).unwrap()
     /// };
     /// assert_eq!(thirty_seven_plus.len(), 17);
     /// assert!(!thirty_seven_plus.iter().enumerate().any(|(i, n)| *n != 37_u64 + i as u64));
     ///
-    /// let (_, stack) = thirty_seven_plus.get_stack();
+    /// let (_, dyn_stack) = thirty_seven_plus.retrieve_stack();
     ///
-    /// let error = stack.push_many(|_| Err::<(), String>("ERROR".to_string()), 2).unwrap_err();
+    /// let error = dyn_stack.push_many(|_| Err::<(), String>("ERROR".to_string()), 2).unwrap_err();
     /// match error {
     ///     Error::Full => panic!("Stack should not be full"),
     ///     Error::ConstructionFailed(e) => assert_eq!(e, "ERROR"),
@@ -216,20 +216,18 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     /// #     return;
     /// # }
     /// use pcc::CompanionStack;
-    /// use pcc::companion_stack::Error;
     ///
-    /// let mut stack = CompanionStack::<64>::new();
-    /// let mut seven_plus = stack.push_slice(&[0_u64; 7]).unwrap();
+    /// let mut dyn_stack = CompanionStack::<64>::new();
+    /// let mut seven_plus = dyn_stack.push_slice(&[0_u64; 7]).unwrap();
     /// assert_eq!(seven_plus.len(), 7);
     ///
     /// seven_plus.iter_mut().enumerate().for_each(|(i, n)| *n += 37 + i as u64);
     /// assert!(!seven_plus.iter().enumerate().any(|(i, n)| *n != 37 + i as u64));
     ///
-    /// let (_, stack) = seven_plus.get_stack();
+    /// let (_, dyn_stack) = seven_plus.retrieve_stack();
     ///
-    /// assert!(stack.push_slice(&[0_u64; 17]).is_none());
+    /// assert!(dyn_stack.push_slice(&[0_u64; 17]).is_none());
     /// ```
-    /// Returns an error if the stack is full.
     #[inline]
     pub fn push_slice<T: Sized>(&mut self, slice: &[T]) -> Option<Handle<[T], SIZE>> {
         let allocated = self.allocate::<T>(slice.len())?;
@@ -324,7 +322,7 @@ impl Default for CompanionStack<DEFAULT_STACK_SIZE> {
     /// ```
     /// use pcc::CompanionStack;
     ///
-    /// let mut stack = CompanionStack::default();
+    /// let mut dyn_stack = CompanionStack::default();
     /// ```
     #[inline]
     fn default() -> Self {
@@ -333,13 +331,99 @@ impl Default for CompanionStack<DEFAULT_STACK_SIZE> {
 }
 
 impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
-    /// Borrows itself as a mutable reference and the stack.
+    /// Retrieves the mutable [`CompanionStack`] reference from the [`Handle`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # if cfg!(miri) {
+    /// #     return;
+    /// # }
+    /// use pcc::CompanionStack;
+    ///
+    /// let mut dyn_stack = CompanionStack::<16>::new();
+    /// let mut seven = dyn_stack.push_one(|| Ok::<_, ()>(7_usize)).unwrap();
+    /// assert_eq!(*seven, 7);
+    ///
+    /// let (seven, dyn_stack) = seven.retrieve_stack();
+    /// assert_eq!(*seven, 7);
+    ///
+    /// let eleven = dyn_stack.push_one(|| Ok::<_, ()>(11_u16)).unwrap();
+    /// assert_eq!(*eleven, 11);
+    /// ```
     #[inline]
-    pub fn get_stack(&mut self) -> (&mut T, &mut CompanionStack<SIZE>) {
+    pub fn retrieve_stack(&mut self) -> (&mut T, &mut CompanionStack<SIZE>) {
         (self.value_mut, self.stack_mut)
     }
 
-    /// Converts the handle to a different type.
+    /// Converts the [`Handle`] into a [`Handle`] of its dereferencing target.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # if cfg!(miri) {
+    /// #     return;
+    /// # }
+    /// use pcc::CompanionStack;
+    /// use pcc::companion_stack::Handle;
+    /// use std::ops::{Deref, DerefMut};
+    ///
+    /// trait A {
+    ///     fn a(&self) -> usize;
+    /// }
+    ///
+    /// struct B(usize);
+    /// impl A for B {
+    ///     fn a(&self) -> usize {
+    ///         self.0
+    ///     }
+    /// }
+    /// impl Deref for B {
+    ///     type Target = dyn A;
+    ///     fn deref(&self) -> &Self::Target {
+    ///         self
+    ///     }
+    /// }
+    /// impl DerefMut for B {
+    ///     fn deref_mut(&mut self) -> &mut Self::Target {
+    ///         self
+    ///     }
+    /// }
+    ///
+    /// struct C(String);
+    /// impl A for C {
+    ///     fn a(&self) -> usize {
+    ///         self.0.len()
+    ///     }
+    /// }
+    /// impl Deref for C {
+    ///     type Target = dyn A;
+    ///     fn deref(&self) -> &Self::Target {
+    ///         self
+    ///     }
+    /// }
+    /// impl DerefMut for C {
+    ///     fn deref_mut(&mut self) -> &mut Self::Target {
+    ///         self
+    ///     }
+    /// }
+    ///
+    /// let b_or_c = 'b';
+    ///
+    /// let mut dyn_stack = CompanionStack::default();
+    /// let handle_dyn: Handle<dyn A> = if b_or_c == 'b' {
+    ///     dyn_stack
+    ///         .push_one(|| Ok::<_, ()>(B(11)))
+    ///         .unwrap()
+    ///         .into_deref_target()
+    /// } else {
+    ///     dyn_stack
+    ///         .push_one(|| Ok::<_, ()>(C("HELLO".to_owned())))
+    ///         .unwrap()
+    ///         .into_deref_target()
+    /// };
+    /// assert_eq!(handle_dyn.a(), 11);
+    /// ```
     #[inline]
     #[must_use]
     pub fn into_deref_target<U>(self) -> Handle<'s, U, SIZE>
@@ -489,11 +573,11 @@ mod tests {
         let mut handle1 = dyn_stack
             .push_one(|| Ok::<_, ()>(Data::<512>(MaybeUninit::uninit())))
             .unwrap();
-        let (_, dyn_stack1) = handle1.get_stack();
+        let (_, dyn_stack1) = handle1.retrieve_stack();
         let mut handle2 = dyn_stack1
             .push_one(|| Ok::<_, ()>(Data::<400>(MaybeUninit::uninit())))
             .unwrap();
-        let (_, dyn_stack2) = handle2.get_stack();
+        let (_, dyn_stack2) = handle2.retrieve_stack();
         assert!(
             dyn_stack2
                 .push_one(|| Ok::<_, ()>(Data::<400>(MaybeUninit::uninit())))
@@ -523,7 +607,7 @@ mod tests {
 
         let mut dyn_stack = CompanionStack::<1024>::new();
         let mut handle1 = dyn_stack.push_many(|i| Ok::<_, ()>(Data(i)), 7).unwrap();
-        let (array1, dyn_stack) = handle1.get_stack();
+        let (array1, dyn_stack) = handle1.retrieve_stack();
         let handle2 = dyn_stack
             .push_one(|| Ok::<_, ()>([Data(0), Data(1), Data(2)]))
             .unwrap();
@@ -654,7 +738,7 @@ mod tests {
             };
         assert_eq!(handle_deref_mut.a(), 5);
 
-        let (_, dyn_stack) = handle_deref_mut.get_stack();
+        let (_, dyn_stack) = handle_deref_mut.retrieve_stack();
 
         let handle_dyn: Handle<dyn A, 1024> = if dyn_stack.buffer_addr() % 2 == 0 {
             dyn_stack

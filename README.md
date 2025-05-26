@@ -45,7 +45,7 @@ let mut dyn_future: Handle<dyn Future<Output = ()>> = if start == SystemTime::no
 
 // The `CompanionStack` instance can be retrieved, but the lifetime of the reference is
 // limited to the scope of the `dyn_future` variable.
-let (dyn_future, dyn_stack) = dyn_future.get_stack();
+let (dyn_future, dyn_stack) = dyn_future.retrieve_stack();
 
 // The buffer is allocated on the stack.
 let mut buffer_size = 1024;
