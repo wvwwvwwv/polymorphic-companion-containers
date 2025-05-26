@@ -2,6 +2,7 @@
 //! to allocate and deallocate values on the stack at runtime.
 
 use super::exit_guard::ExitGuard;
+use std::borrow::{Borrow, BorrowMut};
 use std::mem::{MaybeUninit, align_of, forget, needs_drop, transmute};
 use std::ops::{Deref, DerefMut};
 use std::ptr::{addr_of, copy_nonoverlapping, drop_in_place, slice_from_raw_parts_mut, write};
@@ -29,6 +30,7 @@ pub enum Error<E> {
 }
 
 /// [`Allocation`] represents an allocated memory chunk for a value on the stack.
+#[derive(Debug)]
 struct Allocation<T: Sized> {
     /// The start address of the allocated value.
     ptr: *mut T,
@@ -263,6 +265,23 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     }
 
     /// Returns `true` if the [`CompanionStack`] is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # if cfg!(miri) {
+    /// #     return;
+    /// # }
+    /// use pcc::CompanionStack;
+    ///
+    /// let mut dyn_stack = CompanionStack::<64>::new();
+    /// assert!(dyn_stack.is_empty());
+    ///
+    /// let mut three = dyn_stack.push_one(|| Ok::<_, ()>(3)).unwrap();
+    /// let (three, dyn_stack) = three.retrieve_stack();
+    /// assert_eq!(*three, 3);
+    /// assert!(!dyn_stack.is_empty());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -440,6 +459,34 @@ impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
         let transmuted: Handle<'s, U, SIZE> = unsafe { transmute(converted) };
         forget(self);
         transmuted
+    }
+}
+
+impl<T: ?Sized, const SIZE: usize> Borrow<T> for Handle<'_, T, SIZE> {
+    #[inline]
+    fn borrow(&self) -> &T {
+        self.value_mut
+    }
+}
+
+impl<T: ?Sized, const SIZE: usize> BorrowMut<T> for Handle<'_, T, SIZE> {
+    #[inline]
+    fn borrow_mut(&mut self) -> &mut T {
+        self.value_mut
+    }
+}
+
+impl<T: ?Sized, const SIZE: usize> AsRef<T> for Handle<'_, T, SIZE> {
+    #[inline]
+    fn as_ref(&self) -> &T {
+        self.value_mut
+    }
+}
+
+impl<T: ?Sized, const SIZE: usize> AsMut<T> for Handle<'_, T, SIZE> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut T {
+        self.value_mut
     }
 }
 
