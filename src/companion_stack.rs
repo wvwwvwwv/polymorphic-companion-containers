@@ -178,11 +178,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
             let mut exit_guard = ExitGuard::new(needs_drop::<T>(), |failed| {
                 // Drop all previously constructed elements if construction fails.
                 if failed {
-                    for j in 0..i {
-                        unsafe {
-                            drop_in_place(allocated.ptr.add(j));
-                        }
-                    }
+                    Self::slice_destructor::<T>(allocated.ptr as usize, i);
                 }
             });
             let val = constructor(i).map_err(|e| Error::ConstructionFailed(e))?;
@@ -233,7 +229,10 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     #[inline]
     pub fn push_slice<T: Sized>(&mut self, slice: &[T]) -> Option<Handle<[T], SIZE>> {
         let allocated = self.allocate::<T>(slice.len())?;
-        unsafe { copy_nonoverlapping(slice.as_ptr(), allocated.ptr, slice.len()) };
+        let value_mut = unsafe {
+            copy_nonoverlapping(slice.as_ptr(), allocated.ptr, slice.len());
+            &mut *slice_from_raw_parts_mut(allocated.ptr, slice.len())
+        };
 
         let old_cursor = self.cursor;
         self.cursor = allocated.upper_bound;
@@ -243,7 +242,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
             0
         };
         Some(Handle {
-            value_mut: unsafe { &mut *slice_from_raw_parts_mut(allocated.ptr, slice.len()) },
+            value_mut,
             stack_mut: self,
             old_cursor,
             destructor,
@@ -646,18 +645,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::Relaxed;
 
     #[cfg_attr(miri, ignore)]
     #[test]
     fn test_push_one() {
-        static mut NUM_DROPPED: usize = 0;
+        static NUM_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
         #[derive(Debug)]
         struct Data<const SIZE: usize>(MaybeUninit<[u8; SIZE]>);
 
         impl<const SIZE: usize> Drop for Data<SIZE> {
             fn drop(&mut self) {
-                unsafe { NUM_DROPPED += 1 };
+                NUM_DROPPED.fetch_add(1, Relaxed);
             }
         }
 
@@ -677,14 +678,14 @@ mod tests {
         );
         drop(handle2);
         drop(handle1);
-        assert_eq!(unsafe { NUM_DROPPED }, 2);
+        assert_eq!(NUM_DROPPED.load(Relaxed), 2);
         assert_eq!(dyn_stack.cursor, 0);
     }
 
     #[cfg_attr(miri, ignore)]
     #[test]
     fn test_push_many() {
-        static mut NUM_DROPPED: usize = 0;
+        static NUM_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
         #[derive(Debug)]
         struct Data(usize);
@@ -693,7 +694,7 @@ mod tests {
             fn drop(&mut self) {
                 assert_ne!(self.0, usize::MAX);
                 self.0 = usize::MAX;
-                unsafe { NUM_DROPPED += 1 };
+                NUM_DROPPED.fetch_add(1, Relaxed);
             }
         }
 
@@ -710,23 +711,23 @@ mod tests {
         let handle3: Handle<[Data], 1024> = handle2.into();
         assert!(!handle3.iter().enumerate().any(|(i, data)| i != data.0));
         drop(handle3);
-        assert_eq!(unsafe { NUM_DROPPED }, 3);
+        assert_eq!(NUM_DROPPED.load(Relaxed), 3);
 
         drop(handle1);
-        assert_eq!(unsafe { NUM_DROPPED }, 10);
+        assert_eq!(NUM_DROPPED.load(Relaxed), 10);
     }
 
     #[cfg_attr(miri, ignore)]
     #[test]
     fn test_async() {
-        static mut NUM_DROPPED: usize = 0;
+        static NUM_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
         #[derive(Debug)]
         struct Data<const SIZE: usize>(MaybeUninit<[u8; SIZE]>);
 
         impl<const SIZE: usize> Drop for Data<SIZE> {
             fn drop(&mut self) {
-                unsafe { NUM_DROPPED += 1 };
+                NUM_DROPPED.fetch_add(1, Relaxed);
             }
         }
 
@@ -753,13 +754,13 @@ mod tests {
                 .into()
         };
         drop(handle);
-        assert_eq!(unsafe { NUM_DROPPED }, 1);
+        assert_eq!(NUM_DROPPED.load(Relaxed), 1);
     }
 
     #[cfg_attr(miri, ignore)]
     #[test]
     fn test_deref() {
-        static mut NUM_DROPPED: usize = 0;
+        static NUM_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
         trait A {
             fn a(&self) -> usize;
@@ -789,7 +790,7 @@ mod tests {
 
         impl Drop for Data1 {
             fn drop(&mut self) {
-                unsafe { NUM_DROPPED += 1 };
+                NUM_DROPPED.fetch_add(1, Relaxed);
             }
         }
 
@@ -848,13 +849,13 @@ mod tests {
         drop(handle_dyn);
         drop(handle_deref_mut);
 
-        assert_eq!(unsafe { NUM_DROPPED }, 1);
+        assert_eq!(NUM_DROPPED.load(Relaxed), 1);
     }
 
     #[cfg_attr(miri, ignore)]
     #[test]
     fn test_slice() {
-        static mut NUM_DROPPED: usize = 0;
+        static NUM_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
         #[derive(Debug, Default)]
         struct Data(usize);
@@ -863,7 +864,7 @@ mod tests {
             fn drop(&mut self) {
                 assert_ne!(self.0, usize::MAX);
                 self.0 = usize::MAX;
-                unsafe { NUM_DROPPED += 1 };
+                NUM_DROPPED.fetch_add(1, Relaxed);
             }
         }
 
@@ -882,14 +883,14 @@ mod tests {
 
         drop(handle_slice);
 
-        assert_eq!(unsafe { NUM_DROPPED }, 4);
+        assert_eq!(NUM_DROPPED.load(Relaxed), 4);
     }
 
     #[cfg_attr(miri, ignore)]
     #[cfg(feature = "nightly")]
     #[test]
     fn test_deref_nightly() {
-        static mut NUM_DROPPED: usize = 0;
+        static NUM_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
         trait A {
             fn a(&self) -> usize;
@@ -913,7 +914,7 @@ mod tests {
 
         impl Drop for Data1 {
             fn drop(&mut self) {
-                unsafe { NUM_DROPPED += 1 };
+                NUM_DROPPED.fetch_add(1, Relaxed);
             }
         }
 
@@ -928,7 +929,7 @@ mod tests {
 
         impl Drop for Data2 {
             fn drop(&mut self) {
-                unsafe { NUM_DROPPED += 1 };
+                NUM_DROPPED.fetch_add(1, Relaxed);
             }
         }
 
@@ -943,13 +944,13 @@ mod tests {
         assert_eq!(handle.a(), 5);
         drop(handle);
 
-        assert_eq!(unsafe { NUM_DROPPED }, 1);
+        assert_eq!(NUM_DROPPED.load(Relaxed), 1);
     }
 
     #[cfg(feature = "nightly")]
     #[test]
     fn test_slice_nightly() {
-        static mut NUM_DROPPED: usize = 0;
+        static NUM_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
         #[derive(Debug, Default)]
         struct Data(usize);
@@ -958,7 +959,7 @@ mod tests {
             fn drop(&mut self) {
                 assert_ne!(self.0, usize::MAX);
                 self.0 = usize::MAX;
-                unsafe { NUM_DROPPED += 1 };
+                NUM_DROPPED.fetch_add(1, Relaxed);
             }
         }
 
@@ -979,6 +980,6 @@ mod tests {
 
         drop(handle_slice);
 
-        assert_eq!(unsafe { NUM_DROPPED }, 2);
+        assert_eq!(NUM_DROPPED.load(Relaxed), 2);
     }
 }
