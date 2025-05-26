@@ -1,4 +1,4 @@
-//! [`CompanionStack`] is a first-in-first-out data structure that provides a safe and efficient way
+//! [`CompanionStack`] is a last-in-first-out data structure that provides a safe and efficient way
 //! to allocate and deallocate values on the stack at runtime.
 
 use std::mem::{MaybeUninit, align_of, forget, needs_drop, transmute};
@@ -29,7 +29,7 @@ pub enum Error<E> {
     Full,
 }
 
-/// A dynamically sized stack handle.
+/// [`Handle`] holds ownership of a value allocated on the stack.
 pub struct Handle<'s, T: ?Sized, const SIZE: usize = DEFAULT_STACK_SIZE> {
     inst: &'s mut T,
     old_cursor: usize,
@@ -47,7 +47,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         }
     }
 
-    /// Allocates a new value on the stack.
+    /// Pushes a new value on the stack.
     ///
     /// # Errors
     ///
@@ -94,7 +94,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         })
     }
 
-    /// Pushes a multiple instances.
+    /// Pushes multiple instances.
     ///
     /// # Errors
     ///
@@ -203,7 +203,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         })
     }
 
-    /// Allocates a new value on the stack.
+    /// Returns the address of the buffer.
     #[must_use]
     pub fn buffer_addr(&self) -> usize {
         self.buffer.as_ptr() as usize
