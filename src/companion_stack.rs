@@ -1,13 +1,12 @@
 //! [`CompanionStack`] is a last-in-first-out data structure that provides a safe and efficient way
 //! to allocate and deallocate values on the stack at runtime.
 
+use super::exit_guard::ExitGuard;
 use std::mem::{MaybeUninit, align_of, forget, needs_drop, transmute};
 use std::ops::{Deref, DerefMut};
 use std::ptr::{addr_of, copy_nonoverlapping, drop_in_place, slice_from_raw_parts_mut, write};
 
-use crate::exit_guard::ExitGuard;
-
-/// [`CompanionStack`] is used to allocate and deallocate values on the stack where the size of the
+/// [`CompanionStack`] is used to allocate and deallocate values on the stack when the sizes of the
 /// values are not necessarily known at compile time.
 #[derive(Debug)]
 pub struct CompanionStack<const SIZE: usize = DEFAULT_STACK_SIZE> {
@@ -18,7 +17,7 @@ pub struct CompanionStack<const SIZE: usize = DEFAULT_STACK_SIZE> {
 }
 
 /// The default size of [`CompanionStack`].
-pub const DEFAULT_STACK_SIZE: usize = 16384;
+pub const DEFAULT_STACK_SIZE: usize = size_of::<usize>() * 4096;
 
 /// [`CompanionStack`] raises an [`Error`] if the stack is full or fails to construct a value.
 #[derive(Debug)]
@@ -29,16 +28,38 @@ pub enum Error<E> {
     Full,
 }
 
-/// [`Handle`] holds ownership of a value allocated on the stack.
+/// [`Allocation`] represents an allocated memory chunk for a value on the stack.
+struct Allocation<T: Sized> {
+    /// The start address of the allocated value.
+    ptr: *mut T,
+    /// The upper bound of the allocated memory chunk.
+    upper_bound: usize,
+}
+
+/// [`Handle`] holds ownership of the allocated value and the stack on which the value is located.
+#[derive(Debug)]
 pub struct Handle<'s, T: ?Sized, const SIZE: usize = DEFAULT_STACK_SIZE> {
-    inst: &'s mut T,
+    /// The mutable reference to the allocated value.
+    value_mut: &'s mut T,
+    /// The mutable reference to the stack on which the value is located.
+    stack_mut: &'s mut CompanionStack<SIZE>,
+    /// The old cursor position before the value was allocated.
     old_cursor: usize,
-    stack: &'s mut CompanionStack<SIZE>,
+    /// The destructor function to call when the value is dropped.
     destructor: usize,
 }
 
 impl<const SIZE: usize> CompanionStack<SIZE> {
-    /// Creates a new dynamically sized stack.
+    /// Creates a new [`CompanionStack`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pcc::CompanionStack;
+    ///
+    /// let mut stack = CompanionStack::<65536>::new();
+    /// ```
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -51,45 +72,29 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the stack is full or if the alignment of the type is not supported.
+    /// Returns an [`Error`] if the stack is full or the constructor fails.
     pub fn push_one<E, T: Sized, C: FnOnce() -> Result<T, E>>(
         &mut self,
         constructor: C,
     ) -> Result<Handle<T, SIZE>, Error<E>> {
-        let alignment = align_of::<T>();
-        let size = size_of::<T>();
-        let buffer_start = unsafe { self.buffer.as_ptr().cast::<u8>().add(self.cursor) };
-        let aligned_offset = buffer_start.align_offset(alignment);
-        if aligned_offset == usize::MAX
-            || self
-                .cursor
-                .checked_add(aligned_offset)
-                .and_then(|start| start.checked_add(size))
-                .filter(|end| *end <= SIZE)
-                .is_none()
-        {
-            return Err(Error::Full);
-        }
-        let ptr = unsafe {
-            self.buffer
-                .as_mut_ptr()
-                .cast::<u8>()
-                .add(self.cursor + aligned_offset)
-                .cast::<T>()
+        let allocated = self.allocate::<T>(1).ok_or(Error::Full)?;
+        unsafe {
+            allocated
+                .ptr
+                .write(constructor().map_err(|e| Error::ConstructionFailed(e))?);
         };
-        unsafe { ptr.write(constructor().map_err(|e| Error::ConstructionFailed(e))?) };
 
         let old_cursor = self.cursor;
-        self.cursor = self.cursor + aligned_offset + size;
+        self.cursor = allocated.upper_bound;
         let destructor = if needs_drop::<T>() {
             Self::simple_destructor::<T> as usize
         } else {
             0
         };
         Ok(Handle {
-            inst: unsafe { &mut *ptr },
+            value_mut: unsafe { &mut *allocated.ptr },
+            stack_mut: self,
             old_cursor,
-            stack: self,
             destructor,
         })
     }
@@ -104,40 +109,20 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         mut constructor: C,
         len: usize,
     ) -> Result<Handle<[T], SIZE>, Error<E>> {
-        let alignment = align_of::<T>();
-        let size = size_of::<T>().checked_mul(len).ok_or(Error::Full)?;
-        let buffer_start = unsafe { self.buffer.as_ptr().cast::<u8>().add(self.cursor) };
-        let aligned_offset = buffer_start.align_offset(alignment);
-        if aligned_offset == usize::MAX
-            || self
-                .cursor
-                .checked_add(aligned_offset)
-                .and_then(|start| start.checked_add(size))
-                .filter(|end| *end <= SIZE)
-                .is_none()
-        {
-            return Err(Error::Full);
-        }
-        let ptr = unsafe {
-            self.buffer
-                .as_mut_ptr()
-                .cast::<u8>()
-                .add(self.cursor + aligned_offset)
-                .cast::<T>()
-        };
+        let allocated = self.allocate::<T>(len).ok_or(Error::Full)?;
         for i in 0..len {
             let mut exit_guard = ExitGuard::new(true, |failed| {
                 if failed {
                     for j in 0..i {
                         unsafe {
-                            drop_in_place(ptr.add(j));
+                            drop_in_place(allocated.ptr.add(j));
                         }
                     }
                 }
             });
             unsafe {
                 write(
-                    ptr.add(i),
+                    allocated.ptr.add(i),
                     constructor(i).map_err(|e| Error::ConstructionFailed(e))?,
                 );
             }
@@ -145,16 +130,16 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         }
 
         let old_cursor = self.cursor;
-        self.cursor = self.cursor + aligned_offset + size;
+        self.cursor = allocated.upper_bound;
         let destructor = if needs_drop::<T>() {
             Self::slice_destructor::<T> as usize
         } else {
             0
         };
         Ok(Handle {
-            inst: unsafe { &mut *slice_from_raw_parts_mut(ptr, len) },
+            value_mut: unsafe { &mut *slice_from_raw_parts_mut(allocated.ptr, len) },
+            stack_mut: self,
             old_cursor,
-            stack: self,
             destructor,
         })
     }
@@ -165,40 +150,20 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     ///
     /// Returns an error if the stack is full.
     pub fn push_slice<T: Sized>(&mut self, slice: &[T]) -> Option<Handle<[T], SIZE>> {
-        let alignment = align_of::<T>();
-        let size = size_of::<T>().checked_mul(slice.len())?;
-        let buffer_start = unsafe { self.buffer.as_ptr().cast::<u8>().add(self.cursor) };
-        let aligned_offset = buffer_start.align_offset(alignment);
-        if aligned_offset == usize::MAX
-            || self
-                .cursor
-                .checked_add(aligned_offset)
-                .and_then(|start| start.checked_add(size))
-                .filter(|end| *end <= SIZE)
-                .is_none()
-        {
-            return None;
-        }
-        let ptr = unsafe {
-            self.buffer
-                .as_mut_ptr()
-                .cast::<u8>()
-                .add(self.cursor + aligned_offset)
-                .cast::<T>()
-        };
-        unsafe { copy_nonoverlapping(slice.as_ptr(), ptr, slice.len()) };
+        let allocated = self.allocate::<T>(slice.len())?;
+        unsafe { copy_nonoverlapping(slice.as_ptr(), allocated.ptr, slice.len()) };
 
         let old_cursor = self.cursor;
-        self.cursor = self.cursor + aligned_offset + size;
+        self.cursor = allocated.upper_bound;
         let destructor = if needs_drop::<T>() {
             Self::slice_destructor::<T> as usize
         } else {
             0
         };
         Some(Handle {
-            inst: unsafe { &mut *slice_from_raw_parts_mut(ptr, slice.len()) },
+            value_mut: unsafe { &mut *slice_from_raw_parts_mut(allocated.ptr, slice.len()) },
+            stack_mut: self,
             old_cursor,
-            stack: self,
             destructor,
         })
     }
@@ -220,9 +185,48 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
             unsafe { drop_in_place::<T>(ptr.add(i)) };
         }
     }
+
+    fn allocate<T: Sized>(&mut self, len: usize) -> Option<Allocation<T>> {
+        let alignment = align_of::<T>();
+        let size = size_of::<T>().checked_mul(len)?;
+        let buffer_start = unsafe { self.buffer.as_ptr().cast::<u8>().add(self.cursor) };
+        let aligned_offset = buffer_start.align_offset(alignment);
+        if aligned_offset == usize::MAX
+            || self
+                .cursor
+                .checked_add(aligned_offset)
+                .and_then(|start| start.checked_add(size))
+                .filter(|end| *end <= SIZE)
+                .is_none()
+        {
+            return None;
+        }
+
+        let ptr = unsafe {
+            self.buffer
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(self.cursor + aligned_offset)
+                .cast::<T>()
+        };
+        let upper_bound = self.cursor + aligned_offset + size;
+        Some(Allocation { ptr, upper_bound })
+    }
 }
 
-impl<const SIZE: usize> Default for CompanionStack<SIZE> {
+impl Default for CompanionStack<DEFAULT_STACK_SIZE> {
+    /// Creates a new [`CompanionStack`] of the default size.
+    ///
+    /// The default size is defined by [`DEFAULT_STACK_SIZE`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pcc::CompanionStack;
+    ///
+    /// let mut stack = CompanionStack::default();
+    /// ```
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -231,7 +235,7 @@ impl<const SIZE: usize> Default for CompanionStack<SIZE> {
 impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
     /// Borrows itself as a mutable reference and the stack.
     pub fn get_stack(&mut self) -> (&mut T, &mut CompanionStack<SIZE>) {
-        (self.inst, self.stack)
+        (self.value_mut, self.stack_mut)
     }
 
     /// Converts the handle to a different type.
@@ -242,9 +246,9 @@ impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
         U: ?Sized,
     {
         let converted: Handle<U, SIZE> = Handle {
-            inst: self.inst,
+            value_mut: self.value_mut,
+            stack_mut: self.stack_mut,
             old_cursor: self.old_cursor,
-            stack: self.stack,
             destructor: self.destructor,
         };
         let transmuted: Handle<'s, U, SIZE> = unsafe { transmute(converted) };
@@ -262,27 +266,27 @@ impl<'s, T: ?Sized + core::marker::Unsize<U>, U: ?Sized, const SIZE: usize>
 impl<T: ?Sized, const SIZE: usize> Deref for Handle<'_, T, SIZE> {
     type Target = T;
     fn deref(&self) -> &T {
-        self.inst
+        self.value_mut
     }
 }
 
 impl<T: ?Sized, const SIZE: usize> DerefMut for Handle<'_, T, SIZE> {
     fn deref_mut(&mut self) -> &mut T {
-        self.inst
+        self.value_mut
     }
 }
 
 impl<T: ?Sized, const SIZE: usize> Drop for Handle<'_, T, SIZE> {
     fn drop(&mut self) {
-        self.stack.cursor = self.old_cursor;
+        self.stack_mut.cursor = self.old_cursor;
         if self.destructor != 0 {
             let destructor: fn(usize, usize) = unsafe { transmute(self.destructor) };
             #[allow(clippy::ref_as_ptr)]
-            let addr = (self.inst as *mut T).cast::<()>() as usize;
+            let addr = (self.value_mut as *mut T).cast::<()>() as usize;
             let len = if size_of::<&T>() == size_of::<*mut ()>() {
                 1
             } else {
-                let ptr = addr_of!(self.inst).cast::<usize>();
+                let ptr = addr_of!(self.value_mut).cast::<usize>();
                 unsafe { *ptr.add(1) }
             };
             destructor(addr, len);
@@ -298,9 +302,9 @@ where
 {
     fn from(value: Handle<'s, T, SIZE>) -> Self {
         let converted: Handle<dyn DerefMut<Target = U>, SIZE> = Handle {
-            inst: value.inst,
+            value_mut: value.value_mut,
+            stack_mut: value.stack_mut,
             old_cursor: value.old_cursor,
-            stack: value.stack,
             destructor: value.destructor,
         };
         let transmuted: Self = unsafe { transmute(converted) };
@@ -324,9 +328,9 @@ impl<'s, T: Sized, const SIZE: usize, const LEN: usize> From<Handle<'s, [T; LEN]
 {
     fn from(value: Handle<'s, [T; LEN], SIZE>) -> Self {
         let converted: Handle<[T], SIZE> = Handle {
-            inst: value.inst,
+            value_mut: value.value_mut,
+            stack_mut: value.stack_mut,
             old_cursor: value.old_cursor,
-            stack: value.stack,
             destructor: value.destructor,
         };
         let transmuted: Self = unsafe { transmute(converted) };
@@ -343,9 +347,9 @@ where
 {
     fn from(value: Handle<'s, T, SIZE>) -> Self {
         let converted: Handle<dyn Future<Output = U>, SIZE> = Handle {
-            inst: value.inst,
+            value_mut: value.value_mut,
+            stack_mut: value.stack_mut,
             old_cursor: value.old_cursor,
-            stack: value.stack,
             destructor: value.destructor,
         };
         let transmuted: Self = unsafe { transmute(converted) };
