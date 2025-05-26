@@ -1,6 +1,6 @@
 # Polymorphic Containers
 
-*The crate is still work-in-progress.*
+*The crate is still work-in-progress. The API is subject to change.*
 
 [![Cargo](https://img.shields.io/crates/v/pcc)](https://crates.io/crates/pcc)
 ![Crates.io](https://img.shields.io/crates/l/pcc)
