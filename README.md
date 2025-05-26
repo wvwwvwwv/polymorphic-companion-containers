@@ -6,7 +6,7 @@
 
 ## `CompanionStack`
 
-`CompanionStack` is a polymorphic container that allows you to store and manipulate a collection of elements of different types sizes in the stack. The sizes of elements are not necessarily known at compile time, and they can vary dynamically during runtime.
+`CompanionStack` is a polymorphic container that allows you to store and manipulate a collection of elements of different types in the stack. The sizes of elements are not necessarily known at compile time, and they can vary dynamically during runtime.
 
 ### Examples
 
@@ -20,7 +20,10 @@ use std::time::SystemTime;
 let start = SystemTime::now();
 
 let mut dyn_stack = CompanionStack::new();
-let dyn_future: Handle<dyn Future<Output = ()>> = if start == SystemTime::now() {
+
+// Different `impl Future<Output = ()>` can be used in the code, and either of them can be referred
+// to as `dyn Future<Output = ()>` without boxing them.
+let mut dyn_future: Handle<dyn Future<Output = ()>> = if start == SystemTime::now() {
     dyn_stack.push_one(|| {
         Ok::<_, ()>(async {
             println!("On time");
@@ -37,4 +40,8 @@ let dyn_future: Handle<dyn Future<Output = ()>> = if start == SystemTime::now() 
     .unwrap()
     .into()
 };
+
+// The `CompanionStack` instance can be retrieved, but the lifetime of the reference is limited to
+// the scope of the `dyn_future` variable.
+let (dyn_future, dyn_stack) = dyn_future.get_stack();
 ```
