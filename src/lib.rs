@@ -13,5 +13,6 @@
 )]
 
 pub mod companion_stack;
+pub use companion_stack::CompanionStack;
 
 mod exit_guard;

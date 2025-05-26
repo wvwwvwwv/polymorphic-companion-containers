@@ -1,9 +1,9 @@
 //! [`CompanionStack`] is a first-in-first-out data structure that provides a safe and efficient way
 //! to allocate and deallocate values on the stack at runtime.
 
-use std::mem::{MaybeUninit, align_of, forget, transmute};
+use std::mem::{MaybeUninit, align_of, forget, needs_drop, transmute};
 use std::ops::{Deref, DerefMut};
-use std::ptr::{drop_in_place, write};
+use std::ptr::{addr_of, copy_nonoverlapping, drop_in_place, slice_from_raw_parts_mut, write};
 
 use crate::exit_guard::ExitGuard;
 
@@ -81,7 +81,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
 
         let old_cursor = self.cursor;
         self.cursor = self.cursor + aligned_offset + size;
-        let destructor = if std::mem::needs_drop::<T>() {
+        let destructor = if needs_drop::<T>() {
             Self::simple_destructor::<T> as usize
         } else {
             0
@@ -146,13 +146,13 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
 
         let old_cursor = self.cursor;
         self.cursor = self.cursor + aligned_offset + size;
-        let destructor = if std::mem::needs_drop::<T>() {
+        let destructor = if needs_drop::<T>() {
             Self::slice_destructor::<T> as usize
         } else {
             0
         };
         Ok(Handle {
-            inst: unsafe { &mut *std::ptr::slice_from_raw_parts_mut(ptr, len) },
+            inst: unsafe { &mut *slice_from_raw_parts_mut(ptr, len) },
             old_cursor,
             stack: self,
             destructor,
@@ -186,17 +186,17 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
                 .add(self.cursor + aligned_offset)
                 .cast::<T>()
         };
-        unsafe { std::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len()) };
+        unsafe { copy_nonoverlapping(slice.as_ptr(), ptr, slice.len()) };
 
         let old_cursor = self.cursor;
         self.cursor = self.cursor + aligned_offset + size;
-        let destructor = if std::mem::needs_drop::<T>() {
+        let destructor = if needs_drop::<T>() {
             Self::slice_destructor::<T> as usize
         } else {
             0
         };
         Some(Handle {
-            inst: unsafe { &mut *std::ptr::slice_from_raw_parts_mut(ptr, slice.len()) },
+            inst: unsafe { &mut *slice_from_raw_parts_mut(ptr, slice.len()) },
             old_cursor,
             stack: self,
             destructor,
@@ -211,13 +211,13 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
 
     fn simple_destructor<T: Sized>(addr: usize, _len: usize) {
         let ptr = addr as *mut T;
-        unsafe { std::ptr::drop_in_place::<T>(ptr) };
+        unsafe { drop_in_place::<T>(ptr) };
     }
 
     fn slice_destructor<T: Sized>(addr: usize, len: usize) {
         let ptr = addr as *mut T;
         for i in 0..len {
-            unsafe { std::ptr::drop_in_place::<T>(ptr.add(i)) };
+            unsafe { drop_in_place::<T>(ptr.add(i)) };
         }
     }
 }
@@ -230,7 +230,7 @@ impl<const SIZE: usize> Default for CompanionStack<SIZE> {
 
 impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
     /// Borrows itself as a mutable reference and the stack.
-    pub fn split(&mut self) -> (&mut T, &mut CompanionStack<SIZE>) {
+    pub fn get_stack(&mut self) -> (&mut T, &mut CompanionStack<SIZE>) {
         (self.inst, self.stack)
     }
 
@@ -282,7 +282,7 @@ impl<T: ?Sized, const SIZE: usize> Drop for Handle<'_, T, SIZE> {
             let len = if size_of::<&T>() == size_of::<*mut ()>() {
                 1
             } else {
-                let ptr = std::ptr::addr_of!(self.inst).cast::<usize>();
+                let ptr = addr_of!(self.inst).cast::<usize>();
                 unsafe { *ptr.add(1) }
             };
             destructor(addr, len);
@@ -372,23 +372,24 @@ mod tests {
             }
         }
 
-        let mut ds = CompanionStack::<1024>::new();
-        let mut handle1 = ds
+        let mut dyn_stack = CompanionStack::<1024>::new();
+        let mut handle1 = dyn_stack
             .push_one(|| Ok::<_, ()>(Data::<512>(MaybeUninit::uninit())))
             .unwrap();
-        let (_, ds1) = handle1.split();
-        let mut handle2 = ds1
+        let (_, dyn_stack1) = handle1.get_stack();
+        let mut handle2 = dyn_stack1
             .push_one(|| Ok::<_, ()>(Data::<400>(MaybeUninit::uninit())))
             .unwrap();
-        let (_, ds2) = handle2.split();
+        let (_, dyn_stack2) = handle2.get_stack();
         assert!(
-            ds2.push_one(|| Ok::<_, ()>(Data::<400>(MaybeUninit::uninit())))
+            dyn_stack2
+                .push_one(|| Ok::<_, ()>(Data::<400>(MaybeUninit::uninit())))
                 .is_err()
         );
         drop(handle2);
         drop(handle1);
         assert_eq!(unsafe { NUM_DROPPED }, 2);
-        assert_eq!(ds.cursor, 0);
+        assert_eq!(dyn_stack.cursor, 0);
     }
 
     #[cfg_attr(miri, ignore)]
@@ -407,10 +408,10 @@ mod tests {
             }
         }
 
-        let mut ds = CompanionStack::<1024>::new();
-        let mut handle1 = ds.push_many(|i| Ok::<_, ()>(Data(i)), 7).unwrap();
-        let (array1, ds) = handle1.split();
-        let handle2 = ds
+        let mut dyn_stack = CompanionStack::<1024>::new();
+        let mut handle1 = dyn_stack.push_many(|i| Ok::<_, ()>(Data(i)), 7).unwrap();
+        let (array1, dyn_stack) = handle1.get_stack();
+        let handle2 = dyn_stack
             .push_one(|| Ok::<_, ()>([Data(0), Data(1), Data(2)]))
             .unwrap();
         assert_eq!(array1.len(), 7);
@@ -440,25 +441,27 @@ mod tests {
             }
         }
 
-        let mut ds = CompanionStack::new();
+        let mut dyn_stack = CompanionStack::new();
         let data = Data::<400>(MaybeUninit::uninit());
-        let handle: Handle<dyn Future<Output = ()>> = if ds.buffer_addr() % 2 == 0 {
-            ds.push_one(|| {
-                Ok::<_, ()>(async move {
-                    let data_moved = data;
-                    println!("HI {:?}", &data_moved);
+        let handle: Handle<dyn Future<Output = ()>> = if dyn_stack.buffer_addr() % 2 == 0 {
+            dyn_stack
+                .push_one(|| {
+                    Ok::<_, ()>(async move {
+                        let data_moved = data;
+                        println!("HI {:?}", &data_moved);
+                    })
                 })
-            })
-            .unwrap()
-            .into()
+                .unwrap()
+                .into()
         } else {
-            ds.push_one(|| {
-                Ok::<_, ()>(async {
-                    println!("HO");
+            dyn_stack
+                .push_one(|| {
+                    Ok::<_, ()>(async {
+                        println!("HO");
+                    })
                 })
-            })
-            .unwrap()
-            .into()
+                .unwrap()
+                .into()
         };
         drop(handle);
         assert_eq!(unsafe { NUM_DROPPED }, 1);
@@ -523,25 +526,31 @@ mod tests {
             }
         }
 
-        let mut ds = CompanionStack::<1024>::new();
+        let mut dyn_stack = CompanionStack::<1024>::new();
         let mut handle_deref_mut: Handle<dyn DerefMut<Target = dyn A>, 1024> =
-            if ds.buffer_addr() % 2 == 1 {
-                ds.push_one(|| Ok::<_, ()>(Data1(11))).unwrap().into()
+            if dyn_stack.buffer_addr() % 2 == 1 {
+                dyn_stack
+                    .push_one(|| Ok::<_, ()>(Data1(11)))
+                    .unwrap()
+                    .into()
             } else {
-                ds.push_one(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
+                dyn_stack
+                    .push_one(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
                     .unwrap()
                     .into()
             };
         assert_eq!(handle_deref_mut.a(), 5);
 
-        let (_, ds) = handle_deref_mut.split();
+        let (_, dyn_stack) = handle_deref_mut.get_stack();
 
-        let handle_dyn: Handle<dyn A, 1024> = if ds.buffer_addr() % 2 == 0 {
-            ds.push_one(|| Ok::<_, ()>(Data1(11)))
+        let handle_dyn: Handle<dyn A, 1024> = if dyn_stack.buffer_addr() % 2 == 0 {
+            dyn_stack
+                .push_one(|| Ok::<_, ()>(Data1(11)))
                 .unwrap()
                 .into_deref_target()
         } else {
-            ds.push_one(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
+            dyn_stack
+                .push_one(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
                 .unwrap()
                 .into_deref_target()
         };
@@ -569,11 +578,13 @@ mod tests {
             }
         }
 
-        let mut ds = CompanionStack::<1024>::new();
-        let mut handle_slice: Handle<[Data], 1024> = if ds.buffer_addr() % 2 == 0 {
-            ds.push_slice(&[Data(10), Data(11)]).unwrap()
+        let mut dyn_stack = CompanionStack::<1024>::new();
+        let mut handle_slice: Handle<[Data], 1024> = if dyn_stack.buffer_addr() % 2 == 0 {
+            dyn_stack.push_slice(&[Data(10), Data(11)]).unwrap()
         } else {
-            ds.push_slice(&[Data(12), Data(13), Data(14)]).unwrap()
+            dyn_stack
+                .push_slice(&[Data(12), Data(13), Data(14)])
+                .unwrap()
         };
         handle_slice[0].0 = 15;
         assert_eq!(handle_slice.len(), 2);
@@ -632,11 +643,12 @@ mod tests {
             }
         }
 
-        let mut ds = CompanionStack::<1024>::new();
-        let handle: Handle<dyn A, 1024> = if ds.buffer_addr() % 2 == 1 {
-            ds.push_one(|| Ok::<_, ()>(Data1(11))).unwrap()
+        let mut dyn_stack = CompanionStack::<1024>::new();
+        let handle: Handle<dyn A, 1024> = if dyn_stack.buffer_addr() % 2 == 1 {
+            dyn_stack.push_one(|| Ok::<_, ()>(Data1(11))).unwrap()
         } else {
-            ds.push_one(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
+            dyn_stack
+                .push_one(|| Ok::<_, ()>(Data2("HELLO".to_owned())))
                 .unwrap()
         };
         assert_eq!(handle.a(), 5);
@@ -661,11 +673,14 @@ mod tests {
             }
         }
 
-        let mut ds = CompanionStack::<1024>::new();
-        let mut handle_slice: Handle<[Data], 1024> = if ds.buffer_addr() % 2 == 0 {
-            ds.push_one(|| Ok::<_, ()>([Data(10), Data(11)])).unwrap()
+        let mut dyn_stack = CompanionStack::<1024>::new();
+        let mut handle_slice: Handle<[Data], 1024> = if dyn_stack.buffer_addr() % 2 == 0 {
+            dyn_stack
+                .push_one(|| Ok::<_, ()>([Data(10), Data(11)]))
+                .unwrap()
         } else {
-            ds.push_one(|| Ok::<_, ()>([Data(12), Data(13), Data(14)]))
+            dyn_stack
+                .push_one(|| Ok::<_, ()>([Data(12), Data(13), Data(14)]))
                 .unwrap()
         };
         handle_slice[0].0 = 15;

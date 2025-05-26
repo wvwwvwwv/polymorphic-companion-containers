@@ -58,8 +58,6 @@ jobs:
           rustup component add miri --toolchain nightly
       - name: Miri
         run: cargo +nightly miri test
-      - name: Loom
-        run: cargo test --features loom --release --lib -- --nocapture
   check-misc:
     runs-on: ubuntu-latest
     timeout-minutes: 20
