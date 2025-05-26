@@ -5,7 +5,14 @@
     clippy::missing_safety_doc,
     clippy::pedantic
 )]
-#![doc = include_str!("../README.md")]
+#![cfg_attr(
+    not(miri),
+    doc = include_str!("../README.md")
+)]
+#![cfg_attr(
+    miri,
+    doc = include_str!("../CHANGELOG.md")
+)]
 #![cfg_attr(
     feature = "nightly",
     allow(unstable_features),
