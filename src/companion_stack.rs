@@ -362,7 +362,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
 
     /// Returns the start address of the buffer.
     ///
-    /// Relying on [`Self::pos`] is insufficient to determine whether the buffer can accomodate
+    /// Relying on [`Self::pos`] is insufficient to determine whether the buffer can accommodate
     /// desired data, because the start address of the available buffer may not be aligned to the
     /// required alignment.
     ///
