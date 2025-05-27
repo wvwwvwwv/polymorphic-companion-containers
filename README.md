@@ -12,7 +12,9 @@
 
 ### Examples
 
-Two different `impl Future<Output = ()>` types can be coerced into a `dyn Future<Output = ()>` reference without allocating heap memory.
+Instances of dynamically sized types can be allocated in the stack using `CompanionStack`.
+* References to two differently sized/typed `impl Future<Output = ()>` instances can be coerced into a `dyn Future<Output = ()>` reference without allocating heap memory.
+* Dynamically sized buffers can be stored and they can be uniformly referenced.
 
 ```rust
 use pcc::CompanionStack;
@@ -23,8 +25,9 @@ let start = SystemTime::now();
 
 let mut dyn_stack = CompanionStack::default();
 
-// Different `impl Future<Output = ()>` can be used in the code, and either of them can be
-// referred to as `dyn Future<Output = ()>` without boxing them.
+// Different `impl Future<Output = ()>` can be used in the code, and
+// either of them can be referred to as `dyn Future<Output = ()>` without
+// boxing them.
 let mut dyn_future: Handle<dyn Future<Output = ()>> = if start == SystemTime::now() {
     dyn_stack.push_one(|| {
         Ok::<_, ()>(async {
@@ -43,8 +46,8 @@ let mut dyn_future: Handle<dyn Future<Output = ()>> = if start == SystemTime::no
     .into()
 };
 
-// The `CompanionStack` instance can be retrieved, but the lifetime of the reference is
-// limited to the scope of the `dyn_future` variable.
+// The `CompanionStack` instance can be retrieved, but the reference's
+// lifetime is limited to the scope of the `dyn_future` variable.
 let (dyn_future, dyn_stack) = dyn_future.retrieve_stack();
 
 // The buffer is allocated on the stack.
