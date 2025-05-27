@@ -13,7 +13,7 @@ use core::ptr::{addr_of, copy_nonoverlapping, drop_in_place, slice_from_raw_part
 pub struct CompanionStack<const SIZE: usize = DEFAULT_STACK_SIZE> {
     /// The fixed size buffer.
     buffer: MaybeUninit<[u8; SIZE]>,
-    /// The current position in the buffer.
+    /// The current position on the buffer.
     cursor: usize,
 }
 
@@ -27,6 +27,18 @@ pub enum Error<E> {
     ConstructionFailed(E),
     /// The stack is full.
     Full,
+}
+
+/// [`AlignedSize`] is the align offset and size of a value on the stack.
+///
+/// [`AlignedSize::align_offset`] plus [`AlignedSize::size`] is the total size of memory in bytes
+/// needed to store the value on the stack.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AlignedSize {
+    /// The align offset is the number of bytes to skip before the value is aligned on the stack.
+    pub align_offset: usize,
+    /// The size of the value in bytes.
+    pub size: usize,
 }
 
 /// [`Allocation`] represents an allocated memory chunk for a value on the stack.
@@ -63,11 +75,109 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             buffer: MaybeUninit::uninit(),
             cursor: 0,
         }
+    }
+
+    /// Returns `true` if the [`CompanionStack`] is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # if cfg!(miri) {
+    /// #     return;
+    /// # }
+    /// use pcc::CompanionStack;
+    ///
+    /// let mut dyn_stack = CompanionStack::<64>::new();
+    /// assert!(dyn_stack.is_empty());
+    ///
+    /// let mut three = dyn_stack.push_one(|| Ok::<_, ()>(3)).unwrap();
+    /// let (three, dyn_stack) = three.retrieve_stack();
+    /// assert_eq!(*three, 3);
+    /// assert!(!dyn_stack.is_empty());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.cursor == 0
+    }
+
+    /// Returns the current position of the cursor.
+    ///
+    /// Each [`CompanionStack`] has a cursor that points to the next available byte on the buffer,
+    /// and the method returns the current position of the cursor. `SIZE - pos` is the remaining
+    /// bytes available for use.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # if cfg!(miri) {
+    /// #     return;
+    /// # }
+    /// use pcc::CompanionStack;
+    ///
+    /// #[repr(align(64))]
+    /// struct A(u8);
+    ///
+    /// let mut dyn_stack = CompanionStack::<256>::new();
+    /// assert_eq!(dyn_stack.pos(), 0);
+    ///
+    /// let mut three = dyn_stack.push_one(|| Ok::<_, ()>(A(3))).unwrap();
+    /// let (three, dyn_stack) = three.retrieve_stack();
+    /// assert_eq!(three.0, 3);
+    /// let alignment_offset = if dyn_stack.buffer_addr() % 64 == 0 {
+    ///     0
+    /// }  else {
+    ///     64 - dyn_stack.buffer_addr() % 64
+    /// };
+    /// assert_eq!(dyn_stack.pos(), alignment_offset + 64);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn pos(&self) -> usize {
+        self.cursor
+    }
+
+    /// Calculates the aligned size in bytes required for `len` number of values of the given type
+    /// on the stack.
+    ///
+    /// Returns `None` if the requested size is too large to fit on the stack, otherwise returns
+    /// an [`AlignedSize`] representing the aligned size.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pcc::CompanionStack;
+    ///
+    /// let dyn_stack = CompanionStack::<64>::new();
+    ///
+    /// let aligned_size_i32 = dyn_stack.aligned_size::<i32>(3).unwrap();
+    /// assert!(aligned_size_i32.align_offset < 4);
+    /// assert_eq!(aligned_size_i32.size, 12);
+    ///
+    /// assert!(dyn_stack.aligned_size::<[u64; 32]>(4).is_none());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn aligned_size<T: Sized>(&self, len: usize) -> Option<AlignedSize> {
+        let requested_size = size_of::<T>().checked_mul(len)?;
+        let buffer_start = unsafe { self.buffer.as_ptr().cast::<u8>().add(self.cursor) };
+        let align_offset = buffer_start.align_offset(align_of::<T>());
+        if align_offset == usize::MAX {
+            return None;
+        }
+        self.cursor
+            .checked_add(align_offset)
+            .and_then(|start| start.checked_add(requested_size))
+            .filter(|end| *end <= SIZE)
+            .map(|_| AlignedSize {
+                align_offset,
+                size: requested_size,
+            })
     }
 
     /// Pushes a single value.
@@ -205,7 +315,8 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
 
     /// Pushes a slice.
     ///
-    /// Returns `None` if the [`CompanionStack`] is full.
+    /// The supplied slice is copied into the stack, and a handle to the copy is returned. Returns
+    /// `None` if the [`CompanionStack`] is full.
     ///
     /// # Examples
     ///
@@ -249,42 +360,6 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         })
     }
 
-    /// Returns the current position of the cursor.
-    ///
-    /// Each [`CompanionStack`] has a cursor that points to the next available byte in the buffer,
-    /// and the method returns the current position of the cursor. `SIZE - the position value` is
-    /// the remaining bytes in the [`CompanionStack`] that are available for use.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # if cfg!(miri) {
-    /// #     return;
-    /// # }
-    /// use pcc::CompanionStack;
-    ///
-    /// #[repr(align(64))]
-    /// struct A(u8);
-    ///
-    /// let mut dyn_stack = CompanionStack::<256>::new();
-    /// assert_eq!(dyn_stack.pos(), 0);
-    ///
-    /// let mut three = dyn_stack.push_one(|| Ok::<_, ()>(A(3))).unwrap();
-    /// let (three, dyn_stack) = three.retrieve_stack();
-    /// assert_eq!(three.0, 3);
-    /// let alignment_offset = if dyn_stack.buffer_addr() % 64 == 0 {
-    ///     0
-    /// }  else {
-    ///     64 - dyn_stack.buffer_addr() % 64
-    /// };
-    /// assert_eq!(dyn_stack.pos(), alignment_offset + 64);
-    /// ```
-    #[inline]
-    #[must_use]
-    pub const fn pos(&self) -> usize {
-        self.cursor
-    }
-
     /// Returns the start address of the buffer.
     ///
     /// Relying on [`Self::pos`] is insufficient to determine whether the buffer can accomodate
@@ -308,30 +383,6 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         self.buffer.as_ptr() as usize
     }
 
-    /// Returns `true` if the [`CompanionStack`] is empty.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # if cfg!(miri) {
-    /// #     return;
-    /// # }
-    /// use pcc::CompanionStack;
-    ///
-    /// let mut dyn_stack = CompanionStack::<64>::new();
-    /// assert!(dyn_stack.is_empty());
-    ///
-    /// let mut three = dyn_stack.push_one(|| Ok::<_, ()>(3)).unwrap();
-    /// let (three, dyn_stack) = three.retrieve_stack();
-    /// assert_eq!(*three, 3);
-    /// assert!(!dyn_stack.is_empty());
-    /// ```
-    #[inline]
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.cursor == 0
-    }
-
     /// Destructs the given element.
     fn simple_destructor<T: Sized>(addr: usize, _len: usize) {
         let ptr = addr as *mut T;
@@ -348,29 +399,17 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
 
     /// Allocates a chunk of memory for the given type.
     fn allocate<T: Sized>(&self, len: usize) -> Option<Allocation<T>> {
-        let requested_size = size_of::<T>().checked_mul(len)?;
-        let buffer_start = unsafe { self.buffer.as_ptr().cast::<u8>().add(self.cursor) };
-        let aligned_offset = buffer_start.align_offset(align_of::<T>());
-        if aligned_offset == usize::MAX
-            || self
-                .cursor
-                .checked_add(aligned_offset)
-                .and_then(|start| start.checked_add(requested_size))
-                .filter(|end| *end <= SIZE)
-                .is_none()
-        {
-            return None;
-        }
-
+        let align_offset_and_size = self.aligned_size::<T>(len)?;
         let ptr = unsafe {
             self.buffer
                 .as_ptr()
                 .cast::<u8>()
-                .add(self.cursor + aligned_offset)
+                .add(self.cursor + align_offset_and_size.align_offset)
                 .cast::<T>()
                 .cast_mut()
         };
-        let upper_bound = self.cursor + aligned_offset + requested_size;
+        let upper_bound =
+            self.cursor + align_offset_and_size.align_offset + align_offset_and_size.size;
         Some(Allocation { ptr, upper_bound })
     }
 }
@@ -394,7 +433,8 @@ impl Default for CompanionStack<DEFAULT_STACK_SIZE> {
 }
 
 impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
-    /// Retrieves the mutable [`CompanionStack`] reference from the [`Handle`].
+    /// Retrieves the mutable [`CompanionStack`] reference from the [`Handle`] along with the
+    /// mutable reference to the value.
     ///
     /// # Examples
     ///
