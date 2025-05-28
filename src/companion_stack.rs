@@ -5,7 +5,7 @@ use super::exit_guard::ExitGuard;
 use core::borrow::{Borrow, BorrowMut};
 use core::mem::{MaybeUninit, align_of, forget, needs_drop, transmute};
 use core::ops::{Deref, DerefMut};
-use core::ptr::{addr_of, copy_nonoverlapping, drop_in_place, slice_from_raw_parts_mut, write};
+use core::ptr::{copy_nonoverlapping, drop_in_place, slice_from_raw_parts_mut, write};
 
 /// [`CompanionStack`] is used to allocate and deallocate values on the stack when the sizes of the
 /// values are not necessarily known at compile time.
@@ -59,8 +59,6 @@ pub struct Handle<'s, T: ?Sized, const SIZE: usize = DEFAULT_STACK_SIZE> {
     stack_mut: &'s mut CompanionStack<SIZE>,
     /// The old cursor position before the value was allocated.
     old_cursor: usize,
-    /// The destructor function to call when the value is dropped.
-    destructor: usize,
 }
 
 impl<const SIZE: usize> CompanionStack<SIZE> {
@@ -230,17 +228,10 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         let old_cursor = self.cursor;
         self.cursor = allocated.upper_bound;
 
-        let destructor = if needs_drop::<T>() {
-            Self::simple_destructor::<T> as usize
-        } else {
-            0
-        };
-
         Ok(Handle {
             value_mut,
             stack_mut: self,
             old_cursor,
-            destructor,
         })
     }
 
@@ -288,7 +279,9 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
             let mut exit_guard = ExitGuard::new(needs_drop::<T>(), |failed| {
                 // Drop all previously constructed elements if construction fails.
                 if failed {
-                    Self::slice_destructor::<T>(allocated.ptr as usize, i);
+                    for j in 0..i {
+                        unsafe { drop_in_place::<T>(allocated.ptr.add(j)) };
+                    }
                 }
             });
             let val = constructor(i).map_err(|e| Error::ConstructionFailed(e))?;
@@ -300,16 +293,11 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
 
         let old_cursor = self.cursor;
         self.cursor = allocated.upper_bound;
-        let destructor = if needs_drop::<T>() {
-            Self::slice_destructor::<T> as usize
-        } else {
-            0
-        };
+
         Ok(Handle {
             value_mut: unsafe { &mut *slice_from_raw_parts_mut(allocated.ptr, len) },
             stack_mut: self,
             old_cursor,
-            destructor,
         })
     }
 
@@ -347,16 +335,11 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
 
         let old_cursor = self.cursor;
         self.cursor = allocated.upper_bound;
-        let destructor = if needs_drop::<T>() {
-            Self::slice_destructor::<T> as usize
-        } else {
-            0
-        };
+
         Some(Handle {
             value_mut,
             stack_mut: self,
             old_cursor,
-            destructor,
         })
     }
 
@@ -381,20 +364,6 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     #[must_use]
     pub fn buffer_addr(&self) -> usize {
         self.buffer.as_ptr() as usize
-    }
-
-    /// Destructs the given element.
-    fn simple_destructor<T: Sized>(addr: usize, _len: usize) {
-        let ptr = addr as *mut T;
-        unsafe { drop_in_place::<T>(ptr) };
-    }
-
-    /// Destructs the given slice of elements.
-    fn slice_destructor<T: Sized>(addr: usize, len: usize) {
-        let ptr = addr as *mut T;
-        for i in 0..len {
-            unsafe { drop_in_place::<T>(ptr.add(i)) };
-        }
     }
 
     /// Allocates a chunk of memory for the given type.
@@ -538,7 +507,6 @@ impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
             value_mut: self.value_mut,
             stack_mut: self.stack_mut,
             old_cursor: self.old_cursor,
-            destructor: self.destructor,
         };
         let transmuted: Handle<'s, U, SIZE> = unsafe { transmute(converted) };
         forget(self);
@@ -600,17 +568,8 @@ impl<T: ?Sized, const SIZE: usize> Drop for Handle<'_, T, SIZE> {
     #[inline]
     fn drop(&mut self) {
         self.stack_mut.cursor = self.old_cursor;
-        if self.destructor != 0 {
-            let destructor: fn(usize, usize) = unsafe { transmute(self.destructor) };
-            #[allow(clippy::ref_as_ptr)]
-            let addr = (self.value_mut as *mut T).cast::<()>() as usize;
-            let len = if size_of::<&T>() == size_of::<*mut ()>() {
-                1
-            } else {
-                let ptr = addr_of!(self.value_mut).cast::<usize>();
-                unsafe { *ptr.add(1) }
-            };
-            destructor(addr, len);
+        unsafe {
+            drop_in_place(self.value_mut);
         }
     }
 }
@@ -627,7 +586,6 @@ where
             value_mut: value.value_mut,
             stack_mut: value.stack_mut,
             old_cursor: value.old_cursor,
-            destructor: value.destructor,
         };
         let transmuted: Self = unsafe { transmute(converted) };
         forget(value);
@@ -654,7 +612,6 @@ impl<'s, T: Sized, const SIZE: usize, const LEN: usize> From<Handle<'s, [T; LEN]
             value_mut: value.value_mut,
             stack_mut: value.stack_mut,
             old_cursor: value.old_cursor,
-            destructor: value.destructor,
         };
         let transmuted: Self = unsafe { transmute(converted) };
         forget(value);
@@ -674,7 +631,6 @@ where
             value_mut: value.value_mut,
             stack_mut: value.stack_mut,
             old_cursor: value.old_cursor,
-            destructor: value.destructor,
         };
         let transmuted: Self = unsafe { transmute(converted) };
         forget(value);
@@ -685,6 +641,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::ptr::addr_of;
     use core::sync::atomic::AtomicUsize;
     use core::sync::atomic::Ordering::Relaxed;
 
