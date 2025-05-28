@@ -884,6 +884,19 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     #[cfg(feature = "nightly")]
     #[test]
+    fn test_fn_mut() {
+        static NUM_INVOKED: AtomicUsize = AtomicUsize::new(0);
+
+        let mut dyn_stack = CompanionStack::default();
+        let mut handle_fn: Handle<dyn FnMut(usize) -> usize> = dyn_stack
+            .push_one(|| Ok::<_, ()>(|x| x + NUM_INVOKED.fetch_add(1, Relaxed) + 1))
+            .unwrap();
+        assert_eq!(handle_fn(10), 11);
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[cfg(feature = "nightly")]
+    #[test]
     fn test_deref_nightly() {
         static NUM_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
