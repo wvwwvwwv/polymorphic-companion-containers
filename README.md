@@ -1,6 +1,6 @@
 # Polymorphic Containers
 
-*The crate is still work-in-progress. The API is subject to change.*
+*The API is subject to change until the next major release.*
 
 [![Cargo](https://img.shields.io/crates/v/pcc)](https://crates.io/crates/pcc)
 ![Crates.io](https://img.shields.io/crates/l/pcc)
@@ -15,6 +15,7 @@
 Instances of dynamically sized types can be allocated in the stack using `CompanionStack`.
 * References to two differently sized/typed `impl Future<Output = ()>` instances can be coerced into a `dyn Future<Output = ()>` reference without allocating heap memory.
 * Dynamically sized buffers can be stored and they can be uniformly referenced.
+* Nightly-only feature: `+nightly --features nightly` allows `Handle<T>` to be coerced into `Handle<U>` if `T` can be coerced into `U`.
 
 ```rust
 use pcc::CompanionStack;
@@ -64,4 +65,44 @@ buffer_size *= 2;
 let mut dyn_buffer: Handle<[u8]> =
     dyn_stack.push_many(|_| Ok::<_, ()>(0_u8), buffer_size).unwrap();
 assert_eq!(dyn_buffer.len(), 2048);
+
+#[cfg(not(feature = "nightly"))]
+fn nightly_example(_dyn_stack: &mut CompanionStack) {
+    // `cargo +nightly build --features nightly` will enable the nightly feature.
+}
+
+#[cfg(feature = "nightly")]
+fn nightly_example(dyn_stack: &mut CompanionStack) {
+    let start = SystemTime::now();
+
+    trait Len {
+        fn len(&self) -> usize;
+    }
+
+    struct Data1(usize);
+    impl Len for Data1 {
+        fn len(&self) -> usize {
+            1
+        }
+    }
+
+    struct Data2(Vec<u8>);
+    impl Len for Data2 {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+    }
+
+    // `Handle<Data1>` and `Handle<Data2>` are coerced into `Handle<dyn Len>`.
+    let handle: Handle<dyn Len> = if start == SystemTime::now() {
+        dyn_stack.push_one(|| Ok::<_, ()>(Data1(11))).unwrap()
+    } else {
+        dyn_stack
+            .push_one(|| Ok::<_, ()>(Data2(vec![1, 2, 3, 4])))
+            .unwrap()
+    };
+    assert!(handle.len() == 1 || handle.len() == 4);
+}
+
+nightly_example(dyn_buffer.retrieve_stack().1);
 ```
