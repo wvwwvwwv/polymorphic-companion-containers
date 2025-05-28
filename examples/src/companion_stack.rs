@@ -16,8 +16,8 @@ mod tests {
             if buffer.is_empty() {
                 return acc;
             }
-            let mut new_buffer_handle = dyn_stack.push_slice(&buffer[1..]).unwrap();
-            let (new_buffer, dyn_stack) = new_buffer_handle.retrieve_stack();
+            let mut ref_mut_new_buffer = dyn_stack.push_slice(&buffer[1..]).unwrap();
+            let (new_buffer, dyn_stack) = ref_mut_new_buffer.retrieve_stack();
             use_buffer_recursive(new_buffer, acc + buffer.len(), dyn_stack)
         }
 
@@ -29,12 +29,12 @@ mod tests {
         let required_size = determine_size(&data_emulated);
 
         // The buffer is allocated on the stack.
-        let mut buffer_handle = dyn_stack
+        let mut ref_mut_buffer = dyn_stack
             .push_many(|_| Ok::<_, ()>(0), required_size)
             .unwrap();
 
         // The stack can still be used after allocating the buffer.
-        let (buffer, dyn_stack) = buffer_handle.retrieve_stack();
+        let (buffer, dyn_stack) = ref_mut_buffer.retrieve_stack();
         let result = use_buffer_recursive(buffer, 0, dyn_stack);
 
         assert_eq!(result, 55);

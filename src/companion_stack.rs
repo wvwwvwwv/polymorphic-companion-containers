@@ -20,6 +20,20 @@ pub struct CompanionStack<const SIZE: usize = DEFAULT_STACK_SIZE> {
 /// The default size of [`CompanionStack`].
 pub const DEFAULT_STACK_SIZE: usize = size_of::<usize>() * 4095;
 
+/// [`RefMut`] mutably borrows both the allocated value and the stack on which the value is located.
+///
+/// The lifetime of any newer values pushed into the stack is guaranteed to be shorter than the
+/// lifetime of the [`RefMut`] by mutably borrowing the stack.
+#[derive(Debug)]
+pub struct RefMut<'s, T: ?Sized, const SIZE: usize = DEFAULT_STACK_SIZE> {
+    /// The mutable reference to the allocated value.
+    value_mut: &'s mut T,
+    /// The mutable reference to the stack on which the value is located.
+    stack_mut: &'s mut CompanionStack<SIZE>,
+    /// The old cursor position before the value was allocated.
+    old_cursor: usize,
+}
+
 /// [`CompanionStack`] raises an [`Error`] if the stack is full or fails to construct a value.
 #[derive(Debug)]
 pub enum Error<E> {
@@ -48,17 +62,6 @@ struct Allocation<T: Sized> {
     ptr: *mut T,
     /// The upper bound of the allocated memory chunk.
     upper_bound: usize,
-}
-
-/// [`Handle`] holds ownership of the allocated value and the stack on which the value is located.
-#[derive(Debug)]
-pub struct Handle<'s, T: ?Sized, const SIZE: usize = DEFAULT_STACK_SIZE> {
-    /// The mutable reference to the allocated value.
-    value_mut: &'s mut T,
-    /// The mutable reference to the stack on which the value is located.
-    stack_mut: &'s mut CompanionStack<SIZE>,
-    /// The old cursor position before the value was allocated.
-    old_cursor: usize,
 }
 
 impl<const SIZE: usize> CompanionStack<SIZE> {
@@ -216,7 +219,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     pub fn push_one<E, T: Sized, C: FnOnce() -> Result<T, E>>(
         &mut self,
         constructor: C,
-    ) -> Result<Handle<T, SIZE>, Error<E>> {
+    ) -> Result<RefMut<T, SIZE>, Error<E>> {
         let allocated = self.allocate::<T>(1).ok_or(Error::Full)?;
         let val = constructor().map_err(|e| Error::ConstructionFailed(e))?;
 
@@ -228,7 +231,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         let old_cursor = self.cursor;
         self.cursor = allocated.upper_bound;
 
-        Ok(Handle {
+        Ok(RefMut {
             value_mut,
             stack_mut: self,
             old_cursor,
@@ -273,7 +276,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         &mut self,
         mut constructor: C,
         len: usize,
-    ) -> Result<Handle<[T], SIZE>, Error<E>> {
+    ) -> Result<RefMut<[T], SIZE>, Error<E>> {
         let allocated = self.allocate::<T>(len).ok_or(Error::Full)?;
         for i in 0..len {
             let mut exit_guard = ExitGuard::new(needs_drop::<T>(), |failed| {
@@ -294,7 +297,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         let old_cursor = self.cursor;
         self.cursor = allocated.upper_bound;
 
-        Ok(Handle {
+        Ok(RefMut {
             value_mut: unsafe { &mut *slice_from_raw_parts_mut(allocated.ptr, len) },
             stack_mut: self,
             old_cursor,
@@ -303,8 +306,8 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
 
     /// Pushes a slice.
     ///
-    /// The supplied slice is copied into the stack, and a handle to the copy is returned. Returns
-    /// `None` if the [`CompanionStack`] is full.
+    /// The supplied slice is copied onto the stack, and a [`RefMut`] to the copy is returned.
+    /// Returns `None` if the [`CompanionStack`] is full.
     ///
     /// # Examples
     ///
@@ -326,7 +329,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
     /// assert!(dyn_stack.push_slice(&[0_u64; 17]).is_none());
     /// ```
     #[inline]
-    pub fn push_slice<T: Sized>(&mut self, slice: &[T]) -> Option<Handle<[T], SIZE>> {
+    pub fn push_slice<T: Sized>(&mut self, slice: &[T]) -> Option<RefMut<[T], SIZE>> {
         let allocated = self.allocate::<T>(slice.len())?;
         let value_mut = unsafe {
             copy_nonoverlapping(slice.as_ptr(), allocated.ptr, slice.len());
@@ -336,7 +339,7 @@ impl<const SIZE: usize> CompanionStack<SIZE> {
         let old_cursor = self.cursor;
         self.cursor = allocated.upper_bound;
 
-        Some(Handle {
+        Some(RefMut {
             value_mut,
             stack_mut: self,
             old_cursor,
@@ -401,9 +404,12 @@ impl Default for CompanionStack<DEFAULT_STACK_SIZE> {
     }
 }
 
-impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
-    /// Retrieves the mutable [`CompanionStack`] reference from the [`Handle`] along with the
+impl<'s, T: ?Sized, const SIZE: usize> RefMut<'s, T, SIZE> {
+    /// Retrieves the mutable [`CompanionStack`] reference from the [`RefMut`] along with the
     /// mutable reference to the value.
+    ///
+    /// The lifetime of the [`CompanionStack`] reference is shorter then `self`, forcing any newly
+    /// pushed values to be dropped before `self` is dropped.
     ///
     /// # Examples
     ///
@@ -428,7 +434,7 @@ impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
         (self.value_mut, self.stack_mut)
     }
 
-    /// Converts the [`Handle`] into a [`Handle`] of its dereferencing target.
+    /// Converts the [`RefMut`] into a [`RefMut`] of its dereferencing target.
     ///
     /// # Examples
     ///
@@ -437,7 +443,7 @@ impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
     /// #     return;
     /// # }
     /// use pcc::CompanionStack;
-    /// use pcc::companion_stack::Handle;
+    /// use pcc::companion_stack::RefMut;
     /// use std::ops::{Deref, DerefMut};
     ///
     /// trait A {
@@ -483,7 +489,7 @@ impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
     /// let b_or_c = 'b';
     ///
     /// let mut dyn_stack = CompanionStack::default();
-    /// let handle_dyn: Handle<dyn A> = if b_or_c == 'b' {
+    /// let ref_mut_dyn: RefMut<dyn A> = if b_or_c == 'b' {
     ///     dyn_stack
     ///         .push_one(|| Ok::<_, ()>(B(11)))
     ///         .unwrap()
@@ -494,48 +500,48 @@ impl<'s, T: ?Sized, const SIZE: usize> Handle<'s, T, SIZE> {
     ///         .unwrap()
     ///         .into_deref_target()
     /// };
-    /// assert_eq!(handle_dyn.a(), 11);
+    /// assert_eq!(ref_mut_dyn.a(), 11);
     /// ```
     #[inline]
     #[must_use]
-    pub fn into_deref_target<U>(self) -> Handle<'s, U, SIZE>
+    pub fn into_deref_target<U>(self) -> RefMut<'s, U, SIZE>
     where
         T: DerefMut<Target = U>,
         U: ?Sized,
     {
-        let converted: Handle<U, SIZE> = Handle {
+        let converted: RefMut<U, SIZE> = RefMut {
             value_mut: self.value_mut,
             stack_mut: self.stack_mut,
             old_cursor: self.old_cursor,
         };
-        let transmuted: Handle<'s, U, SIZE> = unsafe { transmute(converted) };
+        let transmuted: RefMut<'s, U, SIZE> = unsafe { transmute(converted) };
         forget(self);
         transmuted
     }
 }
 
-impl<T: ?Sized, const SIZE: usize> Borrow<T> for Handle<'_, T, SIZE> {
+impl<T: ?Sized, const SIZE: usize> Borrow<T> for RefMut<'_, T, SIZE> {
     #[inline]
     fn borrow(&self) -> &T {
         self.value_mut
     }
 }
 
-impl<T: ?Sized, const SIZE: usize> BorrowMut<T> for Handle<'_, T, SIZE> {
+impl<T: ?Sized, const SIZE: usize> BorrowMut<T> for RefMut<'_, T, SIZE> {
     #[inline]
     fn borrow_mut(&mut self) -> &mut T {
         self.value_mut
     }
 }
 
-impl<T: ?Sized, const SIZE: usize> AsRef<T> for Handle<'_, T, SIZE> {
+impl<T: ?Sized, const SIZE: usize> AsRef<T> for RefMut<'_, T, SIZE> {
     #[inline]
     fn as_ref(&self) -> &T {
         self.value_mut
     }
 }
 
-impl<T: ?Sized, const SIZE: usize> AsMut<T> for Handle<'_, T, SIZE> {
+impl<T: ?Sized, const SIZE: usize> AsMut<T> for RefMut<'_, T, SIZE> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
         self.value_mut
@@ -544,11 +550,11 @@ impl<T: ?Sized, const SIZE: usize> AsMut<T> for Handle<'_, T, SIZE> {
 
 #[cfg(feature = "nightly")]
 impl<'s, T: ?Sized + core::marker::Unsize<U>, U: ?Sized, const SIZE: usize>
-    core::ops::CoerceUnsized<Handle<'s, U, SIZE>> for Handle<'s, T, SIZE>
+    core::ops::CoerceUnsized<RefMut<'s, U, SIZE>> for RefMut<'s, T, SIZE>
 {
 }
 
-impl<T: ?Sized, const SIZE: usize> Deref for Handle<'_, T, SIZE> {
+impl<T: ?Sized, const SIZE: usize> Deref for RefMut<'_, T, SIZE> {
     type Target = T;
 
     #[inline]
@@ -557,14 +563,14 @@ impl<T: ?Sized, const SIZE: usize> Deref for Handle<'_, T, SIZE> {
     }
 }
 
-impl<T: ?Sized, const SIZE: usize> DerefMut for Handle<'_, T, SIZE> {
+impl<T: ?Sized, const SIZE: usize> DerefMut for RefMut<'_, T, SIZE> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
         self.value_mut
     }
 }
 
-impl<T: ?Sized, const SIZE: usize> Drop for Handle<'_, T, SIZE> {
+impl<T: ?Sized, const SIZE: usize> Drop for RefMut<'_, T, SIZE> {
     #[inline]
     fn drop(&mut self) {
         self.stack_mut.cursor = self.old_cursor;
@@ -574,15 +580,15 @@ impl<T: ?Sized, const SIZE: usize> Drop for Handle<'_, T, SIZE> {
     }
 }
 
-impl<'s, T, U, const SIZE: usize> From<Handle<'s, T, SIZE>>
-    for Handle<'s, dyn DerefMut<Target = U>, SIZE>
+impl<'s, T, U, const SIZE: usize> From<RefMut<'s, T, SIZE>>
+    for RefMut<'s, dyn DerefMut<Target = U>, SIZE>
 where
     T: DerefMut<Target = U>,
     U: ?Sized,
 {
     #[inline]
-    fn from(value: Handle<'s, T, SIZE>) -> Self {
-        let converted: Handle<dyn DerefMut<Target = U>, SIZE> = Handle {
+    fn from(value: RefMut<'s, T, SIZE>) -> Self {
+        let converted: RefMut<dyn DerefMut<Target = U>, SIZE> = RefMut {
             value_mut: value.value_mut,
             stack_mut: value.stack_mut,
             old_cursor: value.old_cursor,
@@ -593,22 +599,22 @@ where
     }
 }
 
-impl<'s, U, const SIZE: usize> From<Handle<'s, dyn DerefMut<Target = U>, SIZE>>
-    for Handle<'s, U, SIZE>
+impl<'s, U, const SIZE: usize> From<RefMut<'s, dyn DerefMut<Target = U>, SIZE>>
+    for RefMut<'s, U, SIZE>
 where
     U: ?Sized,
 {
-    fn from(value: Handle<'s, dyn DerefMut<Target = U>, SIZE>) -> Self {
+    fn from(value: RefMut<'s, dyn DerefMut<Target = U>, SIZE>) -> Self {
         value.into_deref_target()
     }
 }
 
-impl<'s, T: Sized, const SIZE: usize, const LEN: usize> From<Handle<'s, [T; LEN], SIZE>>
-    for Handle<'s, [T], SIZE>
+impl<'s, T: Sized, const SIZE: usize, const LEN: usize> From<RefMut<'s, [T; LEN], SIZE>>
+    for RefMut<'s, [T], SIZE>
 {
     #[inline]
-    fn from(value: Handle<'s, [T; LEN], SIZE>) -> Self {
-        let converted: Handle<[T], SIZE> = Handle {
+    fn from(value: RefMut<'s, [T; LEN], SIZE>) -> Self {
+        let converted: RefMut<[T], SIZE> = RefMut {
             value_mut: value.value_mut,
             stack_mut: value.stack_mut,
             old_cursor: value.old_cursor,
@@ -619,15 +625,15 @@ impl<'s, T: Sized, const SIZE: usize, const LEN: usize> From<Handle<'s, [T; LEN]
     }
 }
 
-impl<'s, T, U, const SIZE: usize> From<Handle<'s, T, SIZE>>
-    for Handle<'s, dyn Future<Output = U>, SIZE>
+impl<'s, T, U, const SIZE: usize> From<RefMut<'s, T, SIZE>>
+    for RefMut<'s, dyn Future<Output = U>, SIZE>
 where
     T: Future<Output = U>,
     U: ?Sized,
 {
     #[inline]
-    fn from(value: Handle<'s, T, SIZE>) -> Self {
-        let converted: Handle<dyn Future<Output = U>, SIZE> = Handle {
+    fn from(value: RefMut<'s, T, SIZE>) -> Self {
+        let converted: RefMut<dyn Future<Output = U>, SIZE> = RefMut {
             value_mut: value.value_mut,
             stack_mut: value.stack_mut,
             old_cursor: value.old_cursor,
@@ -660,21 +666,21 @@ mod tests {
         }
 
         let mut dyn_stack = CompanionStack::<1024>::new();
-        let mut handle1 = dyn_stack
+        let mut ref_mut_1 = dyn_stack
             .push_one(|| Ok::<_, ()>(Data::<512>(MaybeUninit::uninit())))
             .unwrap();
-        let (_, dyn_stack1) = handle1.retrieve_stack();
-        let mut handle2 = dyn_stack1
+        let (_, dyn_stack1) = ref_mut_1.retrieve_stack();
+        let mut ref_mut_2 = dyn_stack1
             .push_one(|| Ok::<_, ()>(Data::<400>(MaybeUninit::uninit())))
             .unwrap();
-        let (_, dyn_stack2) = handle2.retrieve_stack();
+        let (_, dyn_stack2) = ref_mut_2.retrieve_stack();
         assert!(
             dyn_stack2
                 .push_one(|| Ok::<_, ()>(Data::<400>(MaybeUninit::uninit())))
                 .is_err()
         );
-        drop(handle2);
-        drop(handle1);
+        drop(ref_mut_2);
+        drop(ref_mut_1);
         assert_eq!(NUM_DROPPED.load(Relaxed), 2);
         assert_eq!(dyn_stack.cursor, 0);
     }
@@ -696,21 +702,21 @@ mod tests {
         }
 
         let mut dyn_stack = CompanionStack::<1024>::new();
-        let mut handle1 = dyn_stack.push_many(|i| Ok::<_, ()>(Data(i)), 7).unwrap();
-        let (array1, dyn_stack) = handle1.retrieve_stack();
-        let handle2 = dyn_stack
+        let mut ref_mut_1 = dyn_stack.push_many(|i| Ok::<_, ()>(Data(i)), 7).unwrap();
+        let (array1, dyn_stack) = ref_mut_1.retrieve_stack();
+        let ref_mut_2 = dyn_stack
             .push_one(|| Ok::<_, ()>([Data(0), Data(1), Data(2)]))
             .unwrap();
         assert_eq!(array1.len(), 7);
-        assert_eq!(handle2.len(), 3);
+        assert_eq!(ref_mut_2.len(), 3);
         assert!(!array1.iter().enumerate().any(|(i, data)| i != data.0));
 
-        let handle3: Handle<[Data], 1024> = handle2.into();
-        assert!(!handle3.iter().enumerate().any(|(i, data)| i != data.0));
-        drop(handle3);
+        let ref_mut_3: RefMut<[Data], 1024> = ref_mut_2.into();
+        assert!(!ref_mut_3.iter().enumerate().any(|(i, data)| i != data.0));
+        drop(ref_mut_3);
         assert_eq!(NUM_DROPPED.load(Relaxed), 3);
 
-        drop(handle1);
+        drop(ref_mut_1);
         assert_eq!(NUM_DROPPED.load(Relaxed), 10);
     }
 
@@ -730,7 +736,7 @@ mod tests {
 
         let mut dyn_stack = CompanionStack::new();
         let data = Data::<400>(MaybeUninit::uninit());
-        let handle: Handle<dyn Future<Output = usize>> = if dyn_stack.buffer_addr() % 2 == 0 {
+        let ref_mut: RefMut<dyn Future<Output = usize>> = if dyn_stack.buffer_addr() % 2 == 0 {
             dyn_stack
                 .push_one(|| {
                     Ok::<_, ()>(async move {
@@ -748,7 +754,7 @@ mod tests {
                 .unwrap()
                 .into()
         };
-        drop(handle);
+        drop(ref_mut);
         assert_eq!(NUM_DROPPED.load(Relaxed), 1);
     }
 
@@ -812,7 +818,7 @@ mod tests {
         }
 
         let mut dyn_stack = CompanionStack::<1024>::new();
-        let mut handle_deref_mut: Handle<dyn DerefMut<Target = dyn A>, 1024> =
+        let mut ref_mut_deref_mut: RefMut<dyn DerefMut<Target = dyn A>, 1024> =
             if dyn_stack.buffer_addr() % 2 == 1 {
                 dyn_stack
                     .push_one(|| Ok::<_, ()>(Data1(11)))
@@ -824,11 +830,11 @@ mod tests {
                     .unwrap()
                     .into()
             };
-        assert_eq!(handle_deref_mut.a(), 4);
+        assert_eq!(ref_mut_deref_mut.a(), 4);
 
-        let (_, dyn_stack) = handle_deref_mut.retrieve_stack();
+        let (_, dyn_stack) = ref_mut_deref_mut.retrieve_stack();
 
-        let handle_dyn: Handle<dyn A, 1024> = if dyn_stack.buffer_addr() % 2 == 0 {
+        let ref_mut_dyn: RefMut<dyn A, 1024> = if dyn_stack.buffer_addr() % 2 == 0 {
             dyn_stack
                 .push_one(|| Ok::<_, ()>(Data1(11)))
                 .unwrap()
@@ -839,10 +845,10 @@ mod tests {
                 .unwrap()
                 .into_deref_target()
         };
-        assert_eq!(handle_dyn.a(), 11);
+        assert_eq!(ref_mut_dyn.a(), 11);
 
-        drop(handle_dyn);
-        drop(handle_deref_mut);
+        drop(ref_mut_dyn);
+        drop(ref_mut_deref_mut);
 
         assert_eq!(NUM_DROPPED.load(Relaxed), 1);
     }
@@ -864,38 +870,39 @@ mod tests {
         }
 
         let mut dyn_stack = CompanionStack::<1024>::new();
-        let mut handle_slice: Handle<[Data], 1024> = if dyn_stack.buffer_addr() % 2 == 0 {
+        let mut ref_mut_slice: RefMut<[Data], 1024> = if dyn_stack.buffer_addr() % 2 == 0 {
             dyn_stack.push_slice(&[Data(10), Data(11)]).unwrap()
         } else {
             dyn_stack
                 .push_slice(&[Data(12), Data(13), Data(14)])
                 .unwrap()
         };
-        handle_slice[0].0 = 15;
-        assert_eq!(handle_slice.len(), 2);
-        assert_eq!(handle_slice[0].0, 15);
-        assert_eq!(handle_slice[1].0, 11);
+        ref_mut_slice[0].0 = 15;
+        assert_eq!(ref_mut_slice.len(), 2);
+        assert_eq!(ref_mut_slice[0].0, 15);
+        assert_eq!(ref_mut_slice[1].0, 11);
 
-        drop(handle_slice);
+        drop(ref_mut_slice);
 
         assert_eq!(NUM_DROPPED.load(Relaxed), 4);
     }
 
-    #[cfg_attr(miri, ignore)]
     #[cfg(feature = "nightly")]
+    #[cfg_attr(miri, ignore)]
     #[test]
-    fn test_fn_mut() {
+    fn test_fn_mut_nightly() {
         static NUM_INVOKED: AtomicUsize = AtomicUsize::new(0);
 
         let mut dyn_stack = CompanionStack::default();
-        let mut handle_fn: Handle<dyn FnMut(usize) -> usize> = dyn_stack
+        let mut ref_mut_fn_mut: RefMut<dyn FnMut(usize) -> usize> = dyn_stack
             .push_one(|| Ok::<_, ()>(|x| x + NUM_INVOKED.fetch_add(1, Relaxed) + 1))
             .unwrap();
-        assert_eq!(handle_fn(10), 11);
+        assert_eq!(ref_mut_fn_mut(10), 11);
+        assert_eq!(ref_mut_fn_mut(2), 4);
     }
 
-    #[cfg_attr(miri, ignore)]
     #[cfg(feature = "nightly")]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_deref_nightly() {
         static NUM_DROPPED: AtomicUsize = AtomicUsize::new(0);
@@ -942,20 +949,21 @@ mod tests {
         }
 
         let mut dyn_stack = CompanionStack::<1024>::new();
-        let handle: Handle<dyn A, 1024> = if dyn_stack.buffer_addr() % 2 == 1 {
+        let ref_mut: RefMut<dyn A, 1024> = if dyn_stack.buffer_addr() % 2 == 1 {
             dyn_stack.push_one(|| Ok::<_, ()>(Data1(11))).unwrap()
         } else {
             dyn_stack
                 .push_one(|| Ok::<_, ()>(Data2([1, 2, 3, 4])))
                 .unwrap()
         };
-        assert_eq!(handle.a(), 4);
-        drop(handle);
+        assert_eq!(ref_mut.a(), 4);
+        drop(ref_mut);
 
         assert_eq!(NUM_DROPPED.load(Relaxed), 1);
     }
 
     #[cfg(feature = "nightly")]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_slice_nightly() {
         static NUM_DROPPED: AtomicUsize = AtomicUsize::new(0);
@@ -972,7 +980,7 @@ mod tests {
         }
 
         let mut dyn_stack = CompanionStack::<1024>::new();
-        let mut handle_slice: Handle<[Data], 1024> = if dyn_stack.buffer_addr() % 2 == 0 {
+        let mut ref_mut_slice: RefMut<[Data], 1024> = if dyn_stack.buffer_addr() % 2 == 0 {
             dyn_stack
                 .push_one(|| Ok::<_, ()>([Data(10), Data(11)]))
                 .unwrap()
@@ -981,12 +989,12 @@ mod tests {
                 .push_one(|| Ok::<_, ()>([Data(12), Data(13), Data(14)]))
                 .unwrap()
         };
-        handle_slice[0].0 = 15;
-        assert_eq!(handle_slice.len(), 2);
-        assert_eq!(handle_slice[0].0, 15);
-        assert_eq!(handle_slice[1].0, 11);
+        ref_mut_slice[0].0 = 15;
+        assert_eq!(ref_mut_slice.len(), 2);
+        assert_eq!(ref_mut_slice[0].0, 15);
+        assert_eq!(ref_mut_slice[1].0, 11);
 
-        drop(handle_slice);
+        drop(ref_mut_slice);
 
         assert_eq!(NUM_DROPPED.load(Relaxed), 2);
     }

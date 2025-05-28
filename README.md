@@ -15,11 +15,11 @@
 Instances of dynamically sized types can be allocated in the stack using `CompanionStack`.
 * References to two differently sized/typed `impl Future<Output = ()>` instances can be coerced into a `dyn Future<Output = ()>` reference without allocating heap memory.
 * Dynamically sized buffers can be stored and they can be uniformly referenced.
-* Nightly-only feature: `+nightly --features nightly` allows `Handle<T>` to be coerced into `Handle<U>` if `T` can be coerced into `U`.
+* Nightly-only feature: `+nightly --features nightly` allows `RefMut<T>` to be coerced into `RefMut<U>` if `T` can be coerced into `U`.
 
 ```rust
 use pcc::CompanionStack;
-use pcc::companion_stack::Handle;
+use pcc::companion_stack::RefMut;
 use std::time::SystemTime;
 
 let start = SystemTime::now();
@@ -29,7 +29,7 @@ let mut dyn_stack = CompanionStack::default();
 // Different `impl Future<Output = ()>` can be used in the code, and
 // either of them can be referred to as `dyn Future<Output = ()>` without
 // boxing them.
-let mut dyn_future: Handle<dyn Future<Output = ()>> = if start == SystemTime::now() {
+let mut dyn_future: RefMut<dyn Future<Output = ()>> = if start == SystemTime::now() {
     dyn_stack.push_one(|| {
         Ok::<_, ()>(async {
             println!("On time");
@@ -53,7 +53,7 @@ let (dyn_future, dyn_stack) = dyn_future.retrieve_stack();
 
 // The buffer is allocated on the stack.
 let mut buffer_size = 1024;
-let mut dyn_buffer: Handle<[u8]> =
+let mut dyn_buffer: RefMut<[u8]> =
     dyn_stack.push_many(|_| Ok::<_, ()>(0_u8), buffer_size).unwrap();
 assert_eq!(dyn_buffer.len(), 1024);
 
@@ -62,7 +62,7 @@ drop(dyn_buffer);
 
 // Another buffer of a different size is allocated on the stack.
 buffer_size *= 2;
-let mut dyn_buffer: Handle<[u8]> =
+let mut dyn_buffer: RefMut<[u8]> =
     dyn_stack.push_many(|_| Ok::<_, ()>(0_u8), buffer_size).unwrap();
 assert_eq!(dyn_buffer.len(), 2048);
 
@@ -93,15 +93,15 @@ fn nightly_example(dyn_stack: &mut CompanionStack) {
         }
     }
 
-    // `Handle<Data1>` and `Handle<Data2>` are coerced into `Handle<dyn Len>`.
-    let handle: Handle<dyn Len> = if start == SystemTime::now() {
+    // `RefMut<Data1>` and `RefMut<Data2>` are coerced into `RefMut<dyn Len>`.
+    let dyn_len: RefMut<dyn Len> = if start == SystemTime::now() {
         dyn_stack.push_one(|| Ok::<_, ()>(Data1(11))).unwrap()
     } else {
         dyn_stack
             .push_one(|| Ok::<_, ()>(Data2(vec![1, 2, 3, 4])))
             .unwrap()
     };
-    assert!(handle.len() == 1 || handle.len() == 4);
+    assert!(dyn_len.len() == 1 || dyn_len.len() == 4);
 }
 
 nightly_example(dyn_buffer.retrieve_stack().1);
